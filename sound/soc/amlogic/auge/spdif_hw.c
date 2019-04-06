@@ -650,8 +650,6 @@ void spdifout_play_with_zerodata(unsigned int spdif_id, bool reenable)
 		struct iec958_chsts chsts;
 		struct snd_pcm_substream substream;
 		struct snd_pcm_runtime runtime;
-		extern unsigned int IEC958_mode_codec;
-		IEC958_mode_codec = 0;
 
 		substream.runtime = &runtime;
 		runtime.rate = sample_rate;
