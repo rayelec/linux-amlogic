@@ -1491,7 +1491,7 @@ static int vmpeg12_user_data_read(struct vdec_s *vdec,
 	u32 res;
 	int copy_ok = 1;
 
-	pdest_buf = puserdata_para->pbuf_addr;
+	pdest_buf = (u8 *)puserdata_para->pbuf_addr;
 
 	mutex_lock(&userdata_mutex);
 

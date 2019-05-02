@@ -1108,7 +1108,7 @@ static int vh264_user_data_read(struct vdec_s *vdec,
 	int copy_ok = 1;
 
 
-	pdest_buf = puserdata_para->pbuf_addr;
+	pdest_buf = (u8 *)puserdata_para->pbuf_addr;
 
 
 	mutex_lock(&userdata_mutex);
