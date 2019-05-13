@@ -61,6 +61,9 @@
 #define PARSER_DISCARD      (ES_DISCARD | ES_PARSER_START)
 #define PARSER_BUSY         (ES_PARSER_BUSY)
 
+#define MAX_DRM_PACKAGE_SIZE 0x500000
+
+
 static unsigned char *search_pattern;
 static dma_addr_t search_pattern_map;
 static u32 audio_real_wp;
@@ -609,6 +612,7 @@ Err_1:
 	mutex_unlock(&esparser_mutex);
 	return r;
 }
+EXPORT_SYMBOL(esparser_init);
 
 void esparser_audio_reset_s(struct stream_buf_s *buf)
 {
@@ -714,6 +718,7 @@ void esparser_release(struct stream_buf_s *buf)
 	buf->flag &= ~BUF_FLAG_PARSER;
 	pts_stop(pts_type);
 }
+EXPORT_SYMBOL(esparser_release);
 
 ssize_t drm_write(struct file *file, struct stream_buf_s *stbuf,
 				  const char __user *buf, size_t count)
@@ -745,6 +750,10 @@ ssize_t drm_write(struct file *file, struct stream_buf_s *stbuf,
 	}
 
 	if ((drm->drm_flag & TYPE_DRMINFO) && (drm->drm_hasesdata == 0)) {
+		if (drm->drm_pktsize > MAX_DRM_PACKAGE_SIZE) {
+			pr_err("drm package size is error, size is %u\n", drm->drm_pktsize);
+			return -EINVAL;
+		}
 		/* buf only has drminfo not have esdata; */
 		realbuf = drm->drm_phy;
 		realcount = drm->drm_pktsize;
@@ -755,6 +764,10 @@ ssize_t drm_write(struct file *file, struct stream_buf_s *stbuf,
 		 *drm->drm_hasesdata,stbuf->type,buf);
 		 */
 	} else if (drm->drm_hasesdata == 1) {	/* buf is drminfo+es; */
+		if (drm->drm_pktsize > MAX_DRM_PACKAGE_SIZE) {
+			pr_err("drm package size is error, size is %u\n", drm->drm_pktsize);
+			return -EINVAL;
+		}
 		realcount = drm->drm_pktsize;
 		realbuf = (unsigned long)buf + sizeof(struct drm_info);
 		isphybuf = 0;
@@ -781,7 +794,9 @@ ssize_t drm_write(struct file *file, struct stream_buf_s *stbuf,
 		if (stbuf->type != BUF_TYPE_SUBTITLE
 			&& stbuf_space(stbuf) < count) {
 			/*should not write partial data in drm mode*/
-			stbuf_wait_space(stbuf, count);
+			r = stbuf_wait_space(stbuf, count);
+			if (r < 0)
+				return r;
 			if (stbuf_space(stbuf) < count)
 				return -EAGAIN;
 		}
@@ -821,6 +836,8 @@ ssize_t drm_write(struct file *file, struct stream_buf_s *stbuf,
 
 	return re_count;
 }
+EXPORT_SYMBOL(drm_write);
+
 /*
  *flags:
  *1:phy
@@ -914,7 +931,7 @@ ssize_t esparser_write(struct file *file,
 	}
 	return esparser_write_ex(file, stbuf, buf, count, 0);
 }
-
+EXPORT_SYMBOL(esparser_write);
 
 void esparser_sub_reset(void)
 {

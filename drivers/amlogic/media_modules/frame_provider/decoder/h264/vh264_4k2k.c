@@ -37,6 +37,10 @@
 #include <linux/amlogic/media/codec_mm/codec_mm.h>
 #include <linux/amlogic/media/video_sink/video_keeper.h>
 #include "../utils/firmware.h"
+#include <linux/amlogic/tee.h>
+#include "../../../common/chips/decoder_cpu_ver_info.h"
+
+
 
 #define MEM_NAME "codec_264_4k"
 
@@ -942,8 +946,7 @@ static void vh264_4k2k_put_timer_func(unsigned long arg)
 		struct vframe_s *vf;
 
 		if (kfifo_get(&recycle_q, &vf)) {
-			if ((vf->index >= 0)
-					&& (vf->index < DECODE_BUFFER_NUM_MAX)
+			if ((vf->index < DECODE_BUFFER_NUM_MAX)
 					&& (--vfbuf_use[vf->index] == 0)) {
 				WRITE_VREG(BUFFER_RECYCLE, vf->index + 1);
 				vf->index = DECODE_BUFFER_NUM_MAX;
@@ -1408,7 +1411,7 @@ static s32 vh264_4k2k_init(void)
 	int ret = -1, size = -1;
 	char *buf = vmalloc(0x1000 * 16);
 
-	if (IS_ERR_OR_NULL(buf))
+	if (buf == NULL)
 		return -ENOMEM;
 
 	pr_info("\nvh264_4k2k_init\n");
@@ -1418,8 +1421,10 @@ static s32 vh264_4k2k_init(void)
 	stat |= STAT_TIMER_INIT;
 
 	ret = vh264_4k2k_local_init();
-	if (ret < 0)
+	if (ret < 0) {
+		vfree(buf);
 		return ret;
+	}
 	amvdec_enable();
 
 	/* -- ucode loading (amrisc and swap code) */
@@ -1438,7 +1443,6 @@ static s32 vh264_4k2k_init(void)
 
 	if (H264_4K2K_SINGLE_CORE)
 		size = get_firmware_data(VIDEO_DEC_H264_4k2K_SINGLE, buf);
-
 	else
 		size = get_firmware_data(VIDEO_DEC_H264_4k2K, buf);
 
@@ -1448,11 +1452,18 @@ static s32 vh264_4k2k_init(void)
 		return -1;
 	}
 
-	if (amvdec_loadmc_ex(VFORMAT_H264_4K2K, NULL, buf) < 0) {
+	if (H264_4K2K_SINGLE_CORE)
+		ret = amvdec_loadmc_ex(VFORMAT_H264_4K2K, "single_core", buf);
+	else
+		ret = amvdec_loadmc_ex(VFORMAT_H264_4K2K, NULL, buf);
+
+	if (ret < 0) {
 		amvdec_disable();
 		dma_free_coherent(amports_get_dma_device(),
 			MC_TOTAL_SIZE, mc_cpu_addr, mc_dma_handle);
 		mc_cpu_addr = NULL;
+		pr_err("H264_4K2K: the %s fw loading failed, err: %x\n",
+			tee_enabled() ? "TEE" : "local", ret);
 		return -EBUSY;
 	}
 
@@ -1478,19 +1489,6 @@ static s32 vh264_4k2k_init(void)
 	/*slice*/
 	memcpy((u8 *) mc_cpu_addr + 0x3000, buf + 0x4000, 0x3000);
 
-	if (ret < 0) {
-		amvdec_disable();
-		if (!H264_4K2K_SINGLE_CORE)
-			amvdec2_disable();
-		pr_info("vh264_4k2k load firmware error.\n");
-		if (mc_cpu_addr) {
-			dma_free_coherent(amports_get_dma_device(),
-				MC_TOTAL_SIZE, mc_cpu_addr, mc_dma_handle);
-			mc_cpu_addr = NULL;
-		}
-
-		return -EBUSY;
-	}
 	stat |= STAT_MC_LOAD;
 
 	/* enable AMRISC side protocol */
@@ -1776,7 +1774,7 @@ static int __init amvdec_h264_4k2k_driver_init_module(void)
 		pr_err("failed to register amvdec_h264_4k2k driver\n");
 		return -ENODEV;
 	}
-	if (get_cpu_type() < MESON_CPU_MAJOR_ID_GXTVBB)
+	if (get_cpu_major_id() < AM_MESON_CPU_MAJOR_ID_GXTVBB)
 		vcodec_profile_register(&amvdec_h264_4k2k_profile);
 	INIT_REG_NODE_CONFIGS("media.decoder", &h264_4k2k_node,
 		"h264_4k2k", h264_4k2k_configs, CONFIG_FOR_RW);

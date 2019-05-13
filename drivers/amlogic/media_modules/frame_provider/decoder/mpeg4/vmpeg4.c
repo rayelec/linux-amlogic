@@ -40,6 +40,7 @@
 #include "../utils/decoder_bmmu_box.h"
 #include <linux/amlogic/media/codec_mm/codec_mm.h>
 #include <linux/amlogic/media/codec_mm/configs.h>
+#include <linux/amlogic/tee.h>
 
 /* #define CONFIG_AM_VDEC_MPEG4_LOG */
 #ifdef CONFIG_AM_VDEC_MPEG4_LOG
@@ -715,8 +716,7 @@ static void vmpeg_put_timer_func(unsigned long arg)
 		struct vframe_s *vf;
 
 		if (kfifo_get(&recycle_q, &vf)) {
-			if ((vf->index >= 0)
-				&& (vf->index < DECODE_BUFFER_NUM_MAX)
+			if ((vf->index < DECODE_BUFFER_NUM_MAX)
 				&& (--vfbuf_use[vf->index] == 0)) {
 				WRITE_VREG(MREG_BUFFERIN, ~(1 << vf->index));
 				vf->index = DECODE_BUFFER_NUM_MAX;
@@ -740,6 +740,9 @@ static void vmpeg_put_timer_func(unsigned long arg)
 
 int vmpeg4_dec_status(struct vdec_s *vdec, struct vdec_info *vstatus)
 {
+	if (!(stat & STAT_VDEC_RUN))
+		return -1;
+
 	vstatus->frame_width = vmpeg4_amstream_dec_info.width;
 	vstatus->frame_height = vmpeg4_amstream_dec_info.height;
 	if (0 != vmpeg4_amstream_dec_info.rate)
@@ -1010,45 +1013,29 @@ static void vmpeg4_local_init(void)
 
 static s32 vmpeg4_init(void)
 {
-	int r;
 	int trickmode_fffb = 0;
-	int size = -1;
+	int size = -1, ret = -1;
+	char fw_name[32] = {0};
 	char *buf = vmalloc(0x1000 * 16);
 
 	if (IS_ERR_OR_NULL(buf))
 		return -ENOMEM;
-
-	query_video_status(0, &trickmode_fffb);
-
 	amlog_level(LOG_LEVEL_INFO, "vmpeg4_init\n");
-	init_timer(&recycle_timer);
 
-	stat |= STAT_TIMER_INIT;
-
-	amvdec_enable();
-
-	vmpeg4_local_init();
-
-	if (vmpeg4_amstream_dec_info.format == VIDEO_DEC_FORMAT_MPEG4_3) {
-		size = get_firmware_data(VIDEO_DEC_MPEG4_3, buf);
-
-		amlog_level(LOG_LEVEL_INFO, "load VIDEO_DEC_FORMAT_MPEG4_3\n");
-	} else if (vmpeg4_amstream_dec_info.format ==
-				VIDEO_DEC_FORMAT_MPEG4_4) {
-		size = get_firmware_data(VIDEO_DEC_MPEG4_4, buf);
-
-		amlog_level(LOG_LEVEL_INFO, "load VIDEO_DEC_FORMAT_MPEG4_4\n");
-	} else if (vmpeg4_amstream_dec_info.format ==
+	if (vmpeg4_amstream_dec_info.format ==
 				VIDEO_DEC_FORMAT_MPEG4_5) {
 		size = get_firmware_data(VIDEO_DEC_MPEG4_5, buf);
+		strncpy(fw_name, "vmpeg4_mc_5", sizeof(fw_name));
 
 		amlog_level(LOG_LEVEL_INFO, "load VIDEO_DEC_FORMAT_MPEG4_5\n");
 	} else if (vmpeg4_amstream_dec_info.format == VIDEO_DEC_FORMAT_H263) {
 		size = get_firmware_data(VIDEO_DEC_H263, buf);
+		strncpy(fw_name, "h263_mc", sizeof(fw_name));
 
-		amlog_level(LOG_LEVEL_INFO, "load VIDEO_DEC_FORMAT_H263\n");
+		pr_info("load VIDEO_DEC_FORMAT_H263\n");
 	} else
-		amlog_level(LOG_LEVEL_ERROR, "not supported MPEG4 format\n");
+		pr_err("not supported MPEG4 format %d\n",
+				vmpeg4_amstream_dec_info.format);
 
 	if (size < 0) {
 		pr_err("get firmware fail.");
@@ -1056,32 +1043,39 @@ static s32 vmpeg4_init(void)
 		return -1;
 	}
 
-	if (size == 1)
-		pr_info ("tee load ok");
-	else if (amvdec_loadmc_ex(VFORMAT_MPEG4, NULL, buf) < 0) {
+	ret = amvdec_loadmc_ex(VFORMAT_MPEG4, fw_name, buf);
+	if (ret < 0) {
 		amvdec_disable();
 		vfree(buf);
+		pr_err("%s: the %s fw loading failed, err: %x\n",
+			fw_name, tee_enabled() ? "TEE" : "local", ret);
 		return -EBUSY;
 	}
 
 	vfree(buf);
-
 	stat |= STAT_MC_LOAD;
+	query_video_status(0, &trickmode_fffb);
 
-	/* enable AMRISC side protocol */
-	r = vmpeg4_prot_init();
-	if (r < 0)
-		return r;
+	init_timer(&recycle_timer);
+	stat |= STAT_TIMER_INIT;
 
 	if (vdec_request_irq(VDEC_IRQ_1, vmpeg4_isr,
 			"vmpeg4-irq", (void *)vmpeg4_dec_id)) {
-		amvdec_disable();
-
 		amlog_level(LOG_LEVEL_ERROR, "vmpeg4 irq register error.\n");
 		return -ENOENT;
 	}
-
 	stat |= STAT_ISR_REG;
+	vmpeg4_local_init();
+	/* enable AMRISC side protocol */
+	ret = vmpeg4_prot_init();
+	if (ret < 0) 	 {
+		if (mm_blk_handle) {
+			decoder_bmmu_box_free(mm_blk_handle);
+			mm_blk_handle = NULL;
+		}
+		return ret;
+	}
+	amvdec_enable();
 	fr_hint_status = VDEC_NO_NEED_HINT;
 #ifdef CONFIG_AMLOGIC_POST_PROCESS_MANAGER
 	vf_provider_init(&vmpeg_vf_prov, PROVIDER_NAME, &vmpeg_vf_provider,
@@ -1148,6 +1142,7 @@ static int amvdec_mpeg4_probe(struct platform_device *pdev)
 		amlog_level(LOG_LEVEL_ERROR, "amvdec_mpeg4 init failed.\n");
 		kfree(gvs);
 		gvs = NULL;
+		pdata->dec_status = NULL;
 		return -ENODEV;
 	}
 

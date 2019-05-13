@@ -1,3 +1,22 @@
+/*
+* Copyright (C) 2017 Amlogic, Inc. All rights reserved.
+*
+* This program is free software; you can redistribute it and/or modify
+* it under the terms of the GNU General Public License as published by
+* the Free Software Foundation; either version 2 of the License, or
+* (at your option) any later version.
+*
+* This program is distributed in the hope that it will be useful, but WITHOUT
+* ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+* FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
+* more details.
+*
+* You should have received a copy of the GNU General Public License along
+* with this program; if not, write to the Free Software Foundation, Inc.,
+* 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
+*
+* Description:
+*/
  /*
   * AMLOGIC DVB driver.
   */
@@ -53,6 +72,8 @@ typedef enum __tuner_type
 	TUNER_SI2151,
 	TUNER_MXL661,
 	TUNER_SI2159,
+	TUNER_R842,
+	TUNER_R840,
 	TUNER_MAX_NUM
 }tuner_type;
 
@@ -668,6 +689,9 @@ static int aml_dvb_asyncfifo_init(struct aml_dvb *advb,
 	asyncfifo->id = id;
 	asyncfifo->init = 0;
 	asyncfifo->flush_size = 256 * 1024;
+	asyncfifo->secure_enable = 0;
+	asyncfifo->blk.addr = 0;
+	asyncfifo->blk.len = 0;
 
 	return aml_asyncfifo_hw_init(asyncfifo);
 }
@@ -747,6 +771,20 @@ static ssize_t stb_show_source(struct class *class,
 
 	ret = sprintf(buf, "%s\n", src);
 	return ret;
+}
+
+static ssize_t stb_clear_av(struct class *class,
+				struct class_attribute *attr, const char *buf,
+				size_t size)
+{
+	if (!strncmp("1", buf, 1)) {
+		aml_tsdemux_set_vid(0x1fff);
+		aml_tsdemux_set_aid(0x1fff);
+		aml_tsdemux_set_sid(0x1fff);
+		aml_tsdemux_set_pcrid(0x1fff);
+	}
+
+	return size;
 }
 
 /*Set the STB input source*/
@@ -1279,6 +1317,77 @@ ASYNCFIFO_FLUSHSIZE_FUNC_DECL(0)
 #if ASYNCFIFO_COUNT > 1
 	ASYNCFIFO_FLUSHSIZE_FUNC_DECL(1)
 #endif
+/*Show the async fifo secure buffer addr*/
+#define ASYNCFIFO_SECUREADDR_FUNC_DECL(i)  \
+static ssize_t asyncfifo##i##_show_secure_addr(struct class *class,  \
+				struct class_attribute *attr, char *buf)\
+{\
+	struct aml_dvb *dvb = &aml_dvb_device;\
+	struct aml_asyncfifo *afifo = &dvb->asyncfifo[i];\
+	ssize_t ret = 0;\
+	ret = sprintf(buf, "0x%x\n", afifo->blk.addr);\
+	return ret;\
+} \
+static ssize_t asyncfifo##i##_store_secure_addr(struct class *class,  \
+					struct class_attribute *attr, \
+const char *buf, size_t size)\
+{\
+	struct aml_dvb *dvb = &aml_dvb_device;\
+	struct aml_asyncfifo *afifo = &dvb->asyncfifo[i];\
+	unsigned long value;\
+	int ret = kstrtol(buf, 0, &value);\
+	if (ret == 0 && value != afifo->blk.addr) {\
+		afifo->blk.addr = value;\
+		aml_asyncfifo_hw_reset(&aml_dvb_device.asyncfifo[i]);\
+	} \
+	return size;\
+}
+
+#if ASYNCFIFO_COUNT > 0
+	ASYNCFIFO_SECUREADDR_FUNC_DECL(0)
+#endif
+
+#if ASYNCFIFO_COUNT > 1
+	ASYNCFIFO_SECUREADDR_FUNC_DECL(1)
+#endif
+
+
+/*Show the async fifo secure enable*/
+#define ASYNCFIFO_SECURENABLE_FUNC_DECL(i)  \
+static ssize_t asyncfifo##i##_show_secure_enable(struct class *class,  \
+				struct class_attribute *attr, char *buf)\
+{\
+	struct aml_dvb *dvb = &aml_dvb_device;\
+	struct aml_asyncfifo *afifo = &dvb->asyncfifo[i];\
+	ssize_t ret = 0;\
+	ret = sprintf(buf, "%d\n", afifo->secure_enable);\
+	return ret;\
+} \
+static ssize_t asyncfifo##i##_store_secure_enable(struct class *class,  \
+					struct class_attribute *attr, \
+					const char *buf, size_t size)\
+{\
+	struct aml_dvb *dvb = &aml_dvb_device;\
+	struct aml_asyncfifo *afifo = &dvb->asyncfifo[i];\
+	int enable = 0;\
+	long value;\
+	int ret = kstrtol(buf, 0, &value);\
+	if (ret == 0)\
+		enable = value;\
+	if (enable != afifo->secure_enable) {\
+		afifo->secure_enable = enable;\
+	aml_asyncfifo_hw_reset(&aml_dvb_device.asyncfifo[i]);\
+	} \
+	return size;\
+}
+
+#if ASYNCFIFO_COUNT > 0
+ASYNCFIFO_SECURENABLE_FUNC_DECL(0)
+#endif
+
+#if ASYNCFIFO_COUNT > 1
+	ASYNCFIFO_SECURENABLE_FUNC_DECL(1)
+#endif
 /*Reset the Demux*/
 static ssize_t demux_do_reset(struct class *class,
 				struct class_attribute *attr,
@@ -1514,13 +1623,26 @@ static struct class_attribute aml_stb_class_attrs[] = {
 	__ATTR(asyncfifo##i##_flush_size, 0664,\
 	asyncfifo##i##_show_flush_size, \
 	asyncfifo##i##_store_flush_size)
+#define ASYNCFIFO_SECUREADDR_ATTR_DECL(i)\
+	__ATTR(asyncfifo##i##_secure_addr, S_IRUGO | S_IWUSR | S_IWGRP,\
+	asyncfifo##i##_show_secure_addr, \
+	asyncfifo##i##_store_secure_addr)
+#define ASYNCFIFO_SECURENABLE_ATTR_DECL(i)\
+	__ATTR(asyncfifo##i##_secure_enable, S_IRUGO | S_IWUSR | S_IWGRP,\
+	asyncfifo##i##_show_secure_enable, \
+	asyncfifo##i##_store_secure_enable)
+
 #if ASYNCFIFO_COUNT > 0
 	ASYNCFIFO_SOURCE_ATTR_DECL(0),
 	ASYNCFIFO_FLUSHSIZE_ATTR_DECL(0),
+	ASYNCFIFO_SECUREADDR_ATTR_DECL(0),
+	ASYNCFIFO_SECURENABLE_ATTR_DECL(0),
 #endif
 #if ASYNCFIFO_COUNT > 1
 	ASYNCFIFO_SOURCE_ATTR_DECL(1),
 	ASYNCFIFO_FLUSHSIZE_ATTR_DECL(1),
+	ASYNCFIFO_SECUREADDR_ATTR_DECL(1),
+	ASYNCFIFO_SECURENABLE_ATTR_DECL(1),
 #endif
 
 	__ATTR(demux_reset, 0644, NULL, demux_do_reset),
@@ -1532,6 +1654,7 @@ static struct class_attribute aml_stb_class_attrs[] = {
 	       NULL),
 	__ATTR(first_audio_pts, 0644, demux_show_first_audio_pts,
 	       NULL),
+	__ATTR(clear_av, 0644, NULL, stb_clear_av),
 
 #define DSC_SOURCE_ATTR_DECL(i)\
 	__ATTR(dsc##i##_source,  0664,\
@@ -1760,10 +1883,9 @@ static int aml_dvb_probe(struct platform_device *pdev)
 	for (i = 0; i<DSC_DEV_COUNT; i++)
 		advb->dsc[i].id = -1;
 
-	if (get_cpu_type() < MESON_CPU_MAJOR_ID_G12A) {
-		for (i = 0; i < ASYNCFIFO_COUNT; i++)
-			advb->asyncfifo[i].id = -1;
-	}
+	for (i = 0; i < ASYNCFIFO_COUNT; i++)
+		advb->asyncfifo[i].id = -1;
+
 	advb->dvb_adapter.priv = advb;
 	dev_set_drvdata(advb->dev, advb);
 
@@ -1778,15 +1900,14 @@ static int aml_dvb_probe(struct platform_device *pdev)
 		if (ret < 0)
 			goto error;
 	}
-	if (get_cpu_type() < MESON_CPU_MAJOR_ID_G12A)
-	{
-		/*Init the async fifos */
-		for (i = 0; i < ASYNCFIFO_COUNT; i++) {
-			ret = aml_dvb_asyncfifo_init(advb, &advb->asyncfifo[i], i);
-			if (ret < 0)
-				goto error;
-		}
+
+	/*Init the async fifos */
+	for (i = 0; i < ASYNCFIFO_COUNT; i++) {
+		ret = aml_dvb_asyncfifo_init(advb, &advb->asyncfifo[i], i);
+		if (ret < 0)
+			goto error;
 	}
+
 	aml_regist_dmx_class();
 
 	if (class_register(&aml_stb_class) < 0) {
@@ -1806,8 +1927,11 @@ static int aml_dvb_probe(struct platform_device *pdev)
 		struct i2c_adapter *i2c_adapter = NULL;
 		char buf[32];
 		const char *str = NULL;
+		struct device_node *node_tuner = NULL;
 		struct device_node *node_i2c = NULL;
 		u32 i2c_addr = 0xFFFFFFFF;
+		struct tuner_config cfg = { 0 };
+		u32 value = 0;
 
 		for (i=0; i<FE_DEV_COUNT; i++) {
 			memset(buf, 0, 32);
@@ -1828,17 +1952,21 @@ static int aml_dvb_probe(struct platform_device *pdev)
 					s_demod_type[i] = DEMOD_INTERNAL;
 				}
 
+				memset(&cfg, 0, sizeof(struct tuner_config));
 				memset(buf, 0, 32);
 				snprintf(buf, sizeof(buf), "fe%d_tuner",i);
-				ret = of_property_read_string(pdev->dev.of_node, buf, &str);
+				node_tuner = of_parse_phandle(pdev->dev.of_node, buf, 0);
+				if (!node_tuner)
+					continue;
+
+				ret = of_property_read_string(node_tuner, "tuner_name", &str);
 				if (ret) {
-	//				pr_error("tuner%d type error\n",i);
+					//pr_error("tuner%d type error\n",i);
 					ret = 0;
 					continue;
 				}
-				memset(buf, 0, 32);
-				snprintf(buf, sizeof(buf), "fe%d_i2c_adap_id",i);
-				node_i2c = of_parse_phandle(pdev->dev.of_node,buf,0);
+
+				node_i2c = of_parse_phandle(node_tuner, "tuner_i2c_adap", 0);
 				if (!node_i2c) {
 					pr_error("tuner_i2c_adap_id error\n");
 				} else {
@@ -1846,21 +1974,44 @@ static int aml_dvb_probe(struct platform_device *pdev)
 					of_node_put(node_i2c);
 					if (i2c_adapter == NULL) {
 						pr_error("i2c_get_adapter error\n");
+						of_node_put(node_tuner);
 						goto error_fe;
 					}
 				}
 
-				memset(buf, 0, 32);
-				snprintf(buf, sizeof(buf), "fe%d_tuner_i2c_addr",i);
-				ret = of_property_read_u32(pdev->dev.of_node, buf,&i2c_addr);
+				ret = of_property_read_u32(node_tuner, "tuner_i2c_addr", &i2c_addr);
 				if (ret) {
 					pr_error("i2c_addr error\n");
 				}
+				else
+					cfg.i2c_addr = i2c_addr;
+
+				ret = of_property_read_u32(node_tuner, "tuner_xtal", &value);
+				if (ret)
+					pr_err("tuner_xtal error.\n");
+				else
+					cfg.xtal = value;
+
+				ret = of_property_read_u32(node_tuner, "tuner_xtal_mode", &value);
+				if (ret)
+					pr_err("tuner_xtal_mode error.\n");
+				else
+					cfg.xtal_mode = value;
+
+				ret = of_property_read_u32(node_tuner, "tuner_xtal_cap", &value);
+				if (ret)
+					pr_err("tuner_xtal_cap error.\n");
+				else
+					cfg.xtal_cap = value;
+
+				of_node_put(node_tuner);
+
 				/* define general-purpose callback pointer */
 				frontend[i]->callback = NULL;
 
 				if (!strcmp(str,"si2151_tuner")) {
-					if (!dvb_attach(si2151_attach, frontend[i],i2c_adapter,i2c_addr)) {
+					cfg.id = AM_TUNER_SI2151;
+					if (!dvb_attach(si2151_attach, frontend[i],i2c_adapter,&cfg)) {
 						pr_error("dvb attach tuner error\n");
 						goto error_fe;
 					} else {
@@ -1868,7 +2019,8 @@ static int aml_dvb_probe(struct platform_device *pdev)
 						s_tuner_type[i] = TUNER_SI2151;
 					}
 				}else if(!strcmp(str,"mxl661_tuner")) {
-					if (!dvb_attach(mxl661_attach, frontend[i],i2c_adapter,i2c_addr)) {
+					cfg.id = AM_TUNER_MXL661;
+					if (!dvb_attach(mxl661_attach, frontend[i],i2c_adapter,&cfg)) {
 						pr_error("dvb attach mxl661_attach tuner error\n");
 						goto error_fe;
 					} else {
@@ -1876,12 +2028,31 @@ static int aml_dvb_probe(struct platform_device *pdev)
 						s_tuner_type[i] = TUNER_MXL661;
 					}
 				}else if(!strcmp(str,"si2159_tuner")) {
-					if (!dvb_attach(si2159_attach, frontend[i],i2c_adapter,i2c_addr)) {
+					cfg.id = AM_TUNER_SI2159;
+					if (!dvb_attach(si2159_attach, frontend[i],i2c_adapter,&cfg)) {
 						pr_error("dvb attach si2159_attach tuner error\n");
 						goto error_fe;
 					} else {
 						pr_inf("si2159_attach  attach sucess\n");
 						s_tuner_type[i] = TUNER_SI2159;
+					}
+				}else if(!strcmp(str,"r842_tuner")) {
+					cfg.id = AM_TUNER_R842;
+					if (!dvb_attach(r842_attach, frontend[i],i2c_adapter,&cfg)) {
+						pr_error("dvb attach r842_attach tuner error\n");
+						goto error_fe;
+					} else {
+						pr_inf("r842_attach  attach sucess\n");
+						s_tuner_type[i] = TUNER_R842;
+					}
+				}else if(!strcmp(str,"r840_tuner")) {
+					cfg.id = AM_TUNER_R840;
+					if (!dvb_attach(r840_attach, frontend[i],i2c_adapter,&cfg)) {
+						pr_error("dvb attach r840_attach tuner error\n");
+						goto error_fe;
+					} else {
+						pr_inf("r840_attach  attach sucess\n");
+						s_tuner_type[i] = TUNER_R840;
 					}
 				}else {
 					pr_error("can't support tuner type: %s\n",str);
@@ -1996,19 +2167,23 @@ error_fe:
 			}else if (s_tuner_type[i] == TUNER_SI2159) {
 				dvb_detach(si2159_attach);
 				s_tuner_type[i] = TUNER_INVALID;
+			}else if (s_tuner_type[i] == TUNER_R842) {
+				dvb_detach(r842_attach);
+				s_tuner_type[i] = TUNER_INVALID;
+			}else if (s_tuner_type[i] == TUNER_R840) {
+				dvb_detach(r840_attach);
+				s_tuner_type[i] = TUNER_INVALID;
 			}
 		}
 		return 0;
 	}
 	return 0;
 error:
-	if (get_cpu_type() < MESON_CPU_MAJOR_ID_G12A)
-	{
-		for (i = 0; i < ASYNCFIFO_COUNT; i++) {
-			if (advb->asyncfifo[i].id != -1)
-				aml_dvb_asyncfifo_release(advb, &advb->asyncfifo[i]);
-		}
+	for (i = 0; i < ASYNCFIFO_COUNT; i++) {
+		if (advb->asyncfifo[i].id != -1)
+			aml_dvb_asyncfifo_release(advb, &advb->asyncfifo[i]);
 	}
+
 	for (i = 0; i < DMX_DEV_COUNT; i++) {
 		if (advb->dmx[i].id != -1)
 			aml_dvb_dmx_release(advb, &advb->dmx[i]);
@@ -2040,10 +2215,14 @@ static int aml_dvb_remove(struct platform_device *pdev)
 			dvb_detach(mxl661_attach);
 		}else if (s_tuner_type[i] == TUNER_SI2159) {
 			dvb_detach(si2159_attach);
+		}else if (s_tuner_type[i] == TUNER_R842) {
+			dvb_detach(r842_attach);
+		}else if (s_tuner_type[i] == TUNER_R840) {
+			dvb_detach(r840_attach);
 		}
 
 		if (frontend[i] && \
-			( (s_tuner_type[i] == TUNER_SI2151) || (s_tuner_type[i] == TUNER_MXL661) || (s_tuner_type[i] == TUNER_SI2159) ) \
+			( (s_tuner_type[i] == TUNER_SI2151) || (s_tuner_type[i] == TUNER_MXL661) || (s_tuner_type[i] == TUNER_SI2159) || (s_tuner_type[i] == TUNER_R842) || (s_tuner_type[i] == TUNER_R840)) \
 			)
 		{
 			dvb_unregister_frontend(frontend[i]);
@@ -2058,12 +2237,10 @@ static int aml_dvb_remove(struct platform_device *pdev)
 
 	aml_unregist_dmx_class();
 	class_unregister(&aml_stb_class);
-	if (get_cpu_type() < MESON_CPU_MAJOR_ID_G12A)
-	{
-		for (i = 0; i < ASYNCFIFO_COUNT; i++) {
-			if (advb->asyncfifo[i].id != -1)
-				aml_dvb_asyncfifo_release(advb, &advb->asyncfifo[i]);
-		}
+
+	for (i = 0; i < ASYNCFIFO_COUNT; i++) {
+		if (advb->asyncfifo[i].id != -1)
+			aml_dvb_asyncfifo_release(advb, &advb->asyncfifo[i]);
 	}
 
 	for (i = 0; i < DMX_DEV_COUNT; i++) {

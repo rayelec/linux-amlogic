@@ -1,3 +1,22 @@
+/*
+* Copyright (C) 2017 Amlogic, Inc. All rights reserved.
+*
+* This program is free software; you can redistribute it and/or modify
+* it under the terms of the GNU General Public License as published by
+* the Free Software Foundation; either version 2 of the License, or
+* (at your option) any later version.
+*
+* This program is distributed in the hope that it will be useful, but WITHOUT
+* ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+* FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
+* more details.
+*
+* You should have received a copy of the GNU General Public License along
+* with this program; if not, write to the Free Software Foundation, Inc.,
+* 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
+*
+* Description:
+*/
 #ifndef _AML_DVB_H_
 #define _AML_DVB_H_
 
@@ -214,6 +233,11 @@ struct aml_dmx {
 	u32                 crc_check_time;
 };
 
+struct aml_dvr_block {
+	u32	addr;
+	u32	len;
+};
+
 struct aml_asyncfifo {
 	int	id;
 	int	init;
@@ -225,8 +249,10 @@ struct aml_asyncfifo {
 	int	buf_toggle;
 	int buf_read;
 	int flush_size;
+	int secure_enable;
 	struct tasklet_struct     asyncfifo_tasklet;
 	struct aml_dvb *dvb;
+	struct aml_dvr_block blk;
 };
 
 enum{
