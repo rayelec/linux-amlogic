@@ -3007,8 +3007,21 @@ bool __zone_watermark_ok(struct zone *z, unsigned int order, unsigned long mark,
 	 * are not met, then a high-order request also cannot go ahead
 	 * even if a suitable page happened to be free.
 	 */
+#ifdef CONFIG_AMLOGIC_CMA
+	if (free_pages <= min + z->lowmem_reserve[classzone_idx]) {
+		/* do not using cma until water mark is low */
+		if (unlikely(!cma_first_wm_low && free_pages > 0)) {
+			cma_first_wm_low = true;
+			pr_info("Now can use cma, free:%ld, wm:%ld\n",
+				free_pages,
+				min + z->lowmem_reserve[classzone_idx]);
+		}
+		return false;
+	}
+#else
 	if (free_pages <= min + z->lowmem_reserve[classzone_idx])
 		return false;
+#endif
 
 	/* If this is an order-0 request then the watermark is fine */
 	if (!order)
@@ -4192,11 +4205,11 @@ refill:
 		/* Even if we own the page, we do not use atomic_set().
 		 * This would break get_page_unless_zero() users.
 		 */
-		page_ref_add(page, size - 1);
+		page_ref_add(page, size);
 
 		/* reset page count bias and offset to start of new frag */
 		nc->pfmemalloc = page_is_pfmemalloc(page);
-		nc->pagecnt_bias = size;
+		nc->pagecnt_bias = size + 1;
 		nc->offset = size;
 	}
 
@@ -4212,10 +4225,10 @@ refill:
 		size = nc->size;
 #endif
 		/* OK, page count is 0, we can safely set it */
-		set_page_count(page, size);
+		set_page_count(page, size + 1);
 
 		/* reset page count bias and offset to start of new frag */
-		nc->pagecnt_bias = size;
+		nc->pagecnt_bias = size + 1;
 		offset = size - fragsz;
 	}
 

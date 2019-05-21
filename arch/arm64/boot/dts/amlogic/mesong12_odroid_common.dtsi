@@ -46,13 +46,6 @@
 		status = "okay";
 	};
 
-	ppmgr {
-		compatible = "amlogic, ppmgr";
-		memory-region = <&ppmgr_reserved>;
-		dev_name = "ppmgr";
-		status = "okay";
-	};
-
 	ionvideo {
 		compatible = "amlogic, ionvideo";
 		dev_name = "ionvideo";
@@ -540,6 +533,11 @@
 		mux {
 			groups = "GPIOX_16", "GPIOX_7";
 			function = "gpio_periphs";
+		};
+	};
+	spicc0_pins_x: spicc0_pins_x {
+		mux {
+			drive-strength = <3>;
 		};
 	};
 	spicc0_to_gpiox: spicc0_gpiox {

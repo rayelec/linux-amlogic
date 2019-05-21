@@ -111,6 +111,12 @@ module_param(verbose, uint, 0);
 MODULE_PARM_DESC(verbose,
 "0 silent, >0 show gpios, >1 show devices, >2 show devices before (default=3)");
 
+#if defined(CONFIG_ARCH_MESON64_ODROID_COMMON)
+static unsigned int force64b;
+module_param(force64b, uint, 0000);
+MODULE_PARM_DESC(force64b, "override force 64bits fb data");
+#endif
+
 struct fbtft_device_display {
 	char *name;
 	struct spi_board_info *spi;
@@ -130,6 +136,63 @@ static void adafruit18_green_tab_set_addr_win(struct fbtft_par *par,
 #define CBERRY28_GAMMA \
 		"D0 00 14 15 13 2C 42 43 4E 09 16 14 18 21\n" \
 		"D0 00 14 15 13 0B 43 55 53 0C 17 14 23 20"
+
+#if defined(CONFIG_ARCH_MESON64_ODROID_COMMON)
+static int odroid35_init_sequence[] = {
+	/* Fast SPI-LCD Init : IPS(New Version LCD) */
+	/* Passwd 1 */
+	-1, 0xF0, 0x5A, 0x5A,
+	/* Passwd 2 */
+	-1, 0xF1, 0x5A, 0x5A,
+	/* DISCTL */
+	-1, 0xf2, 0x3B, 0x48, 0x03, 0x08, 0x08, 0x08, 0x08, 0x00, 0x08,
+		  0x08, 0x00, 0x00, 0x00, 0x00, 0x54, 0x08, 0x08, 0x08, 0x08,
+	/* PWRCTL */
+	-1, 0xF4, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		  0x00, 0x3F, 0x79, 0x03, 0x3F, 0x79, 0x03,
+	/* VCMCTL */
+	-1, 0xF5, 0x00, 0x5D, 0x75, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04,
+	    0x00, 0x5D, 0x75,
+	/* SRCCTL */
+	-1, 0xF6, 0x04, 0x00, 0x08, 0x03, 0x01, 0x00, 0x01, 0x00,
+	/* IFCTL */
+	-1, 0xF7, 0x48, 0x80, 0x10, 0x02, 0x00,
+	/* PANELCTL */
+	-1, 0xF8, 0x11, 0x00,
+	/* GAMMASEL : RED */
+	-1, 0xF9, 0x24,
+	/* PGAMMACTL */
+	-1, 0xFA, 0x0B, 0x0B, 0x05, 0x01, 0x0B, 0x20, 0x2C, 0x13,
+		  0x21, 0x24, 0x30, 0x32, 0x24, 0x00, 0x00, 0x01,
+	/* GAMMASEL : GREEN */
+	-1, 0xF9, 0x22,
+	-1, 0xFA, 0x0B, 0x0B, 0x10, 0x31, 0x32, 0x35, 0x36, 0x11,
+		  0x1D, 0x23, 0x2F, 0x2F, 0x24, 0x00, 0x00, 0x01,
+	/* GAMMASEL : BLUE */
+	-1, 0xF9, 0x21,
+	-1, 0xFA, 0x0B, 0x0B, 0x1A, 0x3A, 0x3F, 0x3F, 0x3F, 0x07,
+		  0x18, 0x1F, 0x28, 0x1E, 0x1A, 0x00, 0x00, 0x01,
+	/* COLMCD */
+	-1, 0x3A, 0x55, /* Base Customer Selection */
+	/* 0x77 = 24 bits/pixel, 0x66 = 18 bits/pixel, 0x55 = 16 bits/pixel */
+	/* MADCTL */
+	-1, 0x36, 0x00,
+	/* TEON */
+	-1, 0x35, 0x00,
+	/* PASET */
+	-1, 0x2B, 0x00, 0x00, 0x01, 0xDF,
+	/* CASET */
+	-1, 0x2A, 0x00, 0x00, 0x01, 0x3F,
+	/* SLPOUT */
+	-1, 0x11,
+	/* 120ms Delay */
+	-2, 0xFF,
+	/* DISPON */
+	-1, 0x29,
+	/* end marker */
+	-3,
+};
+#endif
 
 static int cberry28_init_sequence[] = {
 	/* turn off sleep mode */
@@ -925,6 +988,27 @@ static struct fbtft_device_display displays[] = {
 			}
 		}
 	}, {
+		.name = "odroid35",
+		.spi = &(struct spi_board_info) {
+			.modalias = "fb_ili9486",
+			.max_speed_hz = 100000000,
+			.mode = SPI_MODE_0,
+			.platform_data = &(struct fbtft_platform_data) {
+				.display = {
+					.regwidth = 16,
+					.buswidth = 8,
+					.backlight = 1,
+					.init_sequence = odroid35_init_sequence,
+				},
+				.bgr = false,
+				.gpios = (const struct fbtft_gpio []) {
+					{ "reset", 478 },
+					{ "dc", 477 },
+					{},
+				},
+			}
+		}
+	}, {
 #endif
 		.name = "pitft",
 		.spi = &(struct spi_board_info) {
@@ -1444,6 +1528,9 @@ static int fbtft_device_spi_device_register(struct spi_board_info *spi)
 		dev_err(&master->dev, "spi_new_device() returned NULL\n");
 		return -EPERM;
 	}
+#if defined(CONFIG_ARCH_MESON64_ODROID_COMMON)
+	force64b_enable = force64b;
+#endif
 	return 0;
 }
 #else

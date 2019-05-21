@@ -415,6 +415,11 @@ int migrate_page_move_mapping(struct address_space *mapping,
 
 	if (!mapping) {
 		/* Anonymous page without mapping */
+	#ifdef CONFIG_AMLOGIC_CMA
+		if (page_count(page) != expected_count)
+			cma_debug(2, page, " anon page cnt miss match, e:%d\n",
+				  expected_count);
+	#endif
 		if (page_count(page) != expected_count)
 			return -EAGAIN;
 
@@ -439,6 +444,10 @@ int migrate_page_move_mapping(struct address_space *mapping,
 	if (page_count(page) != expected_count ||
 		radix_tree_deref_slot_protected(pslot, &mapping->tree_lock) != page) {
 		spin_unlock_irq(&mapping->tree_lock);
+	#ifdef CONFIG_AMLOGIC_CMA
+		cma_debug(2, page, " file page cnt miss match, e:%d, p:%d\n",
+			  expected_count, page_has_private(page));
+	#endif
 		return -EAGAIN;
 	}
 
@@ -1017,11 +1026,21 @@ static int __unmap_and_move(struct page *page, struct page *newpage,
 			goto out_unlock_both;
 		}
 	} else if (page_mapped(page)) {
+	#ifdef CONFIG_AMLOGIC_CMA
+		int ret;
+
+		ret = try_to_unmap(page,
+				   TTU_MIGRATION | TTU_IGNORE_MLOCK |
+				   TTU_IGNORE_ACCESS);
+		if (ret != SWAP_SUCCESS)
+			cma_debug(2, page, " unmap failed:%d\n", ret);
+	#else
 		/* Establish migration ptes */
 		VM_BUG_ON_PAGE(PageAnon(page) && !PageKsm(page) && !anon_vma,
 				page);
 		try_to_unmap(page,
 			TTU_MIGRATION|TTU_IGNORE_MLOCK|TTU_IGNORE_ACCESS);
+	#endif
 		page_was_mapped = 1;
 	}
 
@@ -1234,6 +1253,16 @@ static int unmap_and_move_huge_page(new_page_t get_new_page,
 		lock_page(hpage);
 	}
 
+	/*
+	 * Check for pages which are in the process of being freed.  Without
+	 * page_mapping() set, hugetlbfs specific move page routine will not
+	 * be called and we could leak usage counts for subpools.
+	 */
+	if (page_private(hpage) && !page_mapping(hpage)) {
+		rc = -EBUSY;
+		goto out_unlock;
+	}
+
 	if (PageAnon(hpage))
 		anon_vma = page_get_anon_vma(hpage);
 
@@ -1265,6 +1294,7 @@ put_anon:
 		set_page_owner_migrate_reason(new_hpage, reason);
 	}
 
+out_unlock:
 	unlock_page(hpage);
 out:
 	if (rc != -EAGAIN)
@@ -1344,6 +1374,9 @@ int migrate_pages(struct list_head *from, new_page_t get_new_page,
 			switch(rc) {
 			case -ENOMEM:
 				nr_failed++;
+			#ifdef CONFIG_AMLOGIC_CMA
+				cma_debug(2, page, " NO MEM\n");
+			#endif
 				goto out;
 			case -EAGAIN:
 				retry++;
@@ -1359,6 +1392,9 @@ int migrate_pages(struct list_head *from, new_page_t get_new_page,
 				 * retried in the next outer loop.
 				 */
 				nr_failed++;
+			#ifdef CONFIG_AMLOGIC_CMA
+				cma_debug(2, page, " failed:%d\n", rc);
+			#endif
 				break;
 			}
 		}

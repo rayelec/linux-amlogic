@@ -1,7 +1,6 @@
 obj-y	+=	 stream_input.o
 
 stream_input-objs	+=	amports/amstream.o
-stream_input-objs	+=	amports/amstream_profile.o
 stream_input-objs	+=	amports/adec.o
 stream_input-objs	+=	parser/thread_rw.o
 stream_input-objs	+=	parser/streambuf.o
@@ -9,6 +8,7 @@ stream_input-objs	+=	parser/esparser.o
 stream_input-objs	+=	parser/tsdemux.o
 stream_input-objs	+=	parser/psparser.o
 stream_input-objs	+=	parser/rmparser.o
+stream_input-objs	+=	subtitle/subtitle.o
 
 # obj-y += parser/hw_demux/
 # obj-y 	+= 	tv_frontend/

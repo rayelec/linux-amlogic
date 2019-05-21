@@ -1645,10 +1645,13 @@ static void handle_port_status(struct xhci_hcd *xhci,
 		}
 	}
 
-	if ((temp & PORT_PLC) && (temp & PORT_PLS_MASK) == XDEV_U0 &&
-			DEV_SUPERSPEED_ANY(temp)) {
+	if ((temp & PORT_PLC) &&
+	    DEV_SUPERSPEED_ANY(temp) &&
+	    ((temp & PORT_PLS_MASK) == XDEV_U0 ||
+	     (temp & PORT_PLS_MASK) == XDEV_U1 ||
+	     (temp & PORT_PLS_MASK) == XDEV_U2)) {
 		xhci_dbg(xhci, "resume SS port %d finished\n", port_id);
-		/* We've just brought the device into U0 through either the
+		/* We've just brought the device into U0/1/2 through either the
 		 * Resume state after a device remote wakeup, or through the
 		 * U3Exit state after a host-initiated resume.  If it's a device
 		 * initiated remote wake, don't pass up the link state change,
@@ -3386,16 +3389,22 @@ int xhci_test_single_step(struct xhci_hcd *xhci, gfp_t mem_flags,
 	struct xhci_td *td;
 	unsigned long flags = 0;
 
+	spin_lock_irqsave(&xhci->lock, flags);
+
 	ep_ring = xhci_urb_to_transfer_ring(xhci, urb);
-	if (!ep_ring)
+	if (!ep_ring) {
+		spin_unlock_irqrestore(&xhci->lock, flags);
 		return -EINVAL;
+	}
 
 	/*
 	 * Need to copy setup packet into setup TRB, so we can't use the setup
 	 * DMA address.
 	 */
-	if (!urb->setup_packet)
+	if (!urb->setup_packet) {
+		spin_unlock_irqrestore(&xhci->lock, flags);
 		return -EINVAL;
+	}
 
 	/* 1 TRB for setup, 1 for status */
 	num_trbs = 2;
@@ -3409,8 +3418,10 @@ int xhci_test_single_step(struct xhci_hcd *xhci, gfp_t mem_flags,
 	ret = prepare_transfer(xhci, xhci->devs[slot_id],
 			ep_index, urb->stream_id,
 			num_trbs, urb, 0, mem_flags);
-	if (ret < 0)
+	if (ret < 0) {
+		spin_unlock_irqrestore(&xhci->lock, flags);
 		return ret;
+	}
 
 	urb_priv = urb->hcpriv;
 	td = urb_priv->td[0];
@@ -3515,14 +3526,12 @@ int xhci_test_single_step(struct xhci_hcd *xhci, gfp_t mem_flags,
 	giveback_first_trb(xhci, slot_id, ep_index, 0,
 			start_cycle, start_trb);
 
-		/* 15 second delay per the test spec */
-		spin_unlock_irqrestore(&xhci->lock, flags);
-		xhci_err(xhci, "step 3\n");
-		msleep(15000);
-		spin_lock_irqsave(&xhci->lock, flags);
+	/* 15 second delay per the test spec */
+	spin_unlock_irqrestore(&xhci->lock, flags);
+	xhci_err(xhci, "step 3\n");
+	msleep(15000);
 
 	return 0;
-
 }
 #endif
 

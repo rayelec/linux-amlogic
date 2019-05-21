@@ -356,6 +356,21 @@ static void purge_vmap_area_lazy(void);
 
 static BLOCKING_NOTIFIER_HEAD(vmap_notify_list);
 
+#ifdef CONFIG_AMLOGIC_MODIFY
+static void dump_vmalloc(void)
+{
+	struct vmap_area *va, *next;
+
+	spin_lock(&vmap_area_lock);
+	list_for_each_entry_safe(va, next, &vmap_area_list, list) {
+		pr_info("%s, va:%lx-%lx, size:%08ld KB, alloc:%pf\n",
+			__func__, va->va_start, va->va_end,
+			(va->va_end - va->va_start) >> 10, va->vm->caller);
+	}
+	spin_unlock(&vmap_area_lock);
+}
+#endif
+
 /*
  * Allocate a region of KVA of the specified size and alignment, within the
  * vstart and vend.
@@ -459,7 +474,11 @@ nocache:
 	}
 
 found:
-	if (addr + size > vend)
+	/*
+	 * Check also calculated address against the vstart,
+	 * because it can be 0 because of big align request.
+	 */
+	if (addr + size > vend || addr < vstart)
 		goto overflow;
 
 	va->va_start = addr;
@@ -492,6 +511,9 @@ overflow:
 		}
 	}
 
+#ifdef CONFIG_AMLOGIC_MODIFY
+	dump_vmalloc();
+#endif
 	if (printk_ratelimit())
 		pr_warn("vmap allocation for size %lu failed: use vmalloc=<size> to increase size\n",
 			size);
@@ -2197,7 +2219,7 @@ int remap_vmalloc_range_partial(struct vm_area_struct *vma, unsigned long uaddr,
 	if (!(area->flags & VM_USERMAP))
 		return -EINVAL;
 
-	if (kaddr + size > area->addr + area->size)
+	if (kaddr + size > area->addr + get_vm_area_size(area))
 		return -EINVAL;
 
 	do {

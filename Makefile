@@ -1,6 +1,6 @@
 VERSION = 4
 PATCHLEVEL = 9
-SUBLEVEL = 162
+SUBLEVEL = 170
 EXTRAVERSION =
 NAME = Roaring Lionus
 
@@ -511,7 +511,7 @@ endif
 ifeq ($(cc-name),clang)
 ifneq ($(CROSS_COMPILE),)
 CLANG_FLAGS	:= --target=$(notdir $(CROSS_COMPILE:%-=%))
-GCC_TOOLCHAIN_DIR := $(dir $(shell which $(LD)))
+GCC_TOOLCHAIN_DIR := $(dir $(shell which $(CROSS_COMPILE)elfedit))
 CLANG_FLAGS	+= --prefix=$(GCC_TOOLCHAIN_DIR)
 GCC_TOOLCHAIN	:= $(realpath $(GCC_TOOLCHAIN_DIR)/..)
 endif
@@ -765,7 +765,7 @@ ifdef CONFIG_CC_STACKPROTECTOR_REGULAR
   stackp-flag := -fstack-protector
   stackp-name := REGULAR
 else
-ifdef CONFIG_CC_STACKPROTECTOR_STRONG
+ifdef CONFIG_CC_STACKPROTECTOR_STRONG_AMLOGIC
   stackp-flag := -fstack-protector-strong
   stackp-name := STRONG
 else
