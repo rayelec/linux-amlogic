@@ -8247,7 +8247,6 @@ module_param_named(queue_print_flag, queue_print_flag, int, 0664);
 module_param_named(full_422_pack, full_422_pack, bool, 0644);
 module_param_named(cma_print, cma_print, bool, 0644);
 module_param_named(pulldown_enable, pulldown_enable, bool, 0644);
-#ifdef DEBUG_SUPPORT
 #ifdef RUN_DI_PROCESS_IN_IRQ
 module_param_named(input2pre, input2pre, uint, 0664);
 module_param_named(input2pre_buf_miss_count, input2pre_buf_miss_count,
@@ -8267,7 +8266,6 @@ module_param_named(pldn_dly1, pldn_dly1, uint, 0644);
 module_param_named(di_reg_unreg_cnt, di_reg_unreg_cnt, int, 0664);
 module_param_named(bypass_pre, bypass_pre, int, 0664);
 module_param_named(frame_count, frame_count, int, 0664);
-#endif
 MODULE_DESCRIPTION("AMLOGIC DEINTERLACE driver");
 MODULE_LICENSE("GPL");
 MODULE_VERSION("4.0.0");
