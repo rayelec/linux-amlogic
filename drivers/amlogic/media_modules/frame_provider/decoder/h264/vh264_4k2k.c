@@ -59,9 +59,6 @@
 #include <linux/amlogic/media/codec_mm/codec_mm.h>
 #include <linux/amlogic/media/codec_mm/configs.h>
 
-#include <trace/events/meson_atrace.h>
-
-
 #if  0 /* MESON_CPU_TYPE == MESON_CPU_TYPE_MESON6TVD */
 #define DOUBLE_WRITE
 #endif
@@ -76,6 +73,7 @@
 #define MAX_BMMU_BUFFER_NUM	(DECODE_BUFFER_NUM_MAX + DISPLAY_BUFFER_NUM)
 #define VF_BUFFER_IDX(n) (2  + n)
 #define DECODER_WORK_SPACE_SIZE 0x800000
+
 
 #if  1 /* MESON_CPU_TYPE == MESON_CPU_TYPE_MESONG9TV */
 #define H264_4K2K_SINGLE_CORE 1
@@ -684,7 +682,6 @@ static irqreturn_t vh264_4k2k_isr(int irq, void *dev_id)
 	unsigned int stream_offset;
 	struct vframe_s *vf = NULL;
 	int ret = READ_VREG(MAILBOX_COMMAND);
-	u32 frame_size;
 
 	switch (ret & 0xff) {
 	case CMD_ALLOC_VIEW:
@@ -721,7 +718,6 @@ static irqreturn_t vh264_4k2k_isr(int irq, void *dev_id)
 				ret = pts_lookup_offset_us64(PTS_TYPE_VIDEO,
 							stream_offset,
 							&vf->pts,
-							&frame_size,
 							0,
 							&vf->pts_us64);
 				if (ret != 0)
@@ -768,7 +764,6 @@ static irqreturn_t vh264_4k2k_isr(int irq, void *dev_id)
 					VF_BUFFER_IDX(display_buff_id));
 				kfifo_put(&display_q,
 						  (const struct vframe_s *)vf);
-				ATRACE_COUNTER(MODULE_NAME, vf->pts);
 
 				vf_notify_receiver(PROVIDER_NAME,
 					VFRAME_EVENT_PROVIDER_VFRAME_READY,

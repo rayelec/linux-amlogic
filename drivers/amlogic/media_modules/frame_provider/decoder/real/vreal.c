@@ -54,9 +54,6 @@
 #include "../utils/firmware.h"
 #include <linux/amlogic/tee.h>
 
-#include <trace/events/meson_atrace.h>
-
-
 #define DRIVER_NAME "amvdec_real"
 #define MODULE_NAME "amvdec_real"
 
@@ -358,7 +355,6 @@ static irqreturn_t vreal_isr(int irq, void *dev_id)
 				buffer_index);
 
 		kfifo_put(&display_q, (const struct vframe_s *)vf);
-		ATRACE_COUNTER(MODULE_NAME, vf->pts);
 
 		frame_count++;
 		vf_notify_receiver(PROVIDER_NAME,

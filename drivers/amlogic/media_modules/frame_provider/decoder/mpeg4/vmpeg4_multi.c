@@ -46,9 +46,6 @@
 #include <linux/amlogic/media/codec_mm/configs.h>
 #include "../utils/firmware.h"
 
-#include <trace/events/meson_atrace.h>
-
-
 #define DRIVER_NAME "ammvdec_mpeg4"
 #define MODULE_NAME "ammvdec_mpeg4"
 
@@ -111,8 +108,6 @@ static u32 buf_size = 32 * 1024 * 1024;
 #define CHECK_INTERVAL        (HZ/100)
 
 #define DUR2PTS(x) ((x) - ((x) >> 4))
-
-#define MAX_MPEG4_SUPPORT_SIZE (1920*1088)
 
 #define DEC_RESULT_NONE     0
 #define DEC_RESULT_DONE     1
@@ -438,7 +433,6 @@ static irqreturn_t vmpeg4_isr_thread_fn(struct vdec_s *vdec, int irq)
 	u32 pts, offset = 0;
 	bool pts_valid = false;
 	u64 pts_us64 = 0;
-	u32 frame_size;
 	u32 time_increment_resolution, fixed_vop_rate, vop_time_inc;
 	u32 repeat_cnt, duration = 3200;
 	struct vdec_mpeg4_hw_s *hw = (struct vdec_mpeg4_hw_s *)(vdec->private);
@@ -577,8 +571,7 @@ static irqreturn_t vmpeg4_isr_thread_fn(struct vdec_s *vdec, int irq)
 				hw->pts64[index] = hw->chunk->pts64;
 			} else {
 				if (pts_lookup_offset_us64
-					(PTS_TYPE_VIDEO, offset, &pts,
-					&frame_size, 3000,
+					(PTS_TYPE_VIDEO, offset, &pts, 3000,
 					&pts_us64) == 0) {
 					hw->pts_valid[index] = true;
 					hw->pts[index] = pts;
@@ -759,7 +752,6 @@ static irqreturn_t vmpeg4_isr_thread_fn(struct vdec_s *vdec, int irq)
 			} else {
 				kfifo_put(&hw->display_q,
 				(const struct vframe_s *)vf);
-				ATRACE_COUNTER(MODULE_NAME, vf->pts);
 				hw->frame_num++;
 			vdec->vdec_fps_detec(vdec->id);
 			vf_notify_receiver(vdec->vf_provider_name,
@@ -809,7 +801,6 @@ static irqreturn_t vmpeg4_isr_thread_fn(struct vdec_s *vdec, int irq)
 			} else {
 				kfifo_put(&hw->display_q,
 				(const struct vframe_s *)vf);
-				ATRACE_COUNTER(MODULE_NAME, vf->pts);
 				hw->frame_num++;
 			vdec->vdec_fps_detec(vdec->id);
 			vf_notify_receiver(vdec->vf_provider_name,
@@ -865,7 +856,6 @@ static irqreturn_t vmpeg4_isr_thread_fn(struct vdec_s *vdec, int irq)
 					vf->duration = duration * (hw->timeout_flag + 1);
 				kfifo_put(&hw->display_q,
 					(const struct vframe_s *)vf);
-				ATRACE_COUNTER(MODULE_NAME, vf->pts);
 				hw->frame_num++;
 				hw->timeout_flag = 0;
 				vdec->vdec_fps_detec(vdec->id);
@@ -934,7 +924,6 @@ static void vmpeg4_work(struct work_struct *work)
 			hw->ctx_valid = 1;
 
 		vdec_vframe_dirty(hw_to_vdec(hw), hw->chunk);
-		hw->chunk = NULL;
 	} else if (hw->dec_result == DEC_RESULT_AGAIN
 	&& (hw_to_vdec(hw)->next_status !=
 		VDEC_STATUS_DISCONNECTED)) {
@@ -968,7 +957,6 @@ static void vmpeg4_work(struct work_struct *work)
 			hw->stat &= ~STAT_VDEC_RUN;
 		}
 		vdec_vframe_dirty(hw_to_vdec(hw), hw->chunk);
-		hw->chunk = NULL;
 		vdec_clean_input(hw_to_vdec(hw));
 	}
 	if (hw->stat & STAT_VDEC_RUN) {
@@ -1566,9 +1554,7 @@ static s32 vmmpeg4_init(struct vdec_mpeg4_hw_s *hw)
 			VIDEO_DEC_FORMAT_H263) {
 		size = get_firmware_data(VIDEO_DEC_H263_MULTI, fw->data);
 		strncpy(fw->name, "mh263_mc", sizeof(fw->name));
-	} else
-		pr_err("unsupport mpeg4 sub format %d\n",
-				hw->vmpeg4_amstream_dec_info.format);
+	}
 	pr_info("mmpeg4 get fw %s, size %x\n", fw->name, size);
 	if (size < 0) {
 		pr_err("get firmware failed.");
@@ -1878,20 +1864,9 @@ static int ammvdec_mpeg4_probe(struct platform_device *pdev)
 	hw->buf_start = hw->cma_alloc_addr;
 	hw->buf_size = DEFAULT_MEM_SIZE;
 */
-	if (pdata->sys_info) {
+	if (pdata->sys_info)
 		hw->vmpeg4_amstream_dec_info = *pdata->sys_info;
-		if ((hw->vmpeg4_amstream_dec_info.height != 0) &&
-			(hw->vmpeg4_amstream_dec_info.width >
-			(MAX_MPEG4_SUPPORT_SIZE/hw->vmpeg4_amstream_dec_info.height))) {
-			pr_info("ammvdec_mpeg4: oversize, unsupport: %d*%d\n",
-				hw->vmpeg4_amstream_dec_info.width,
-				hw->vmpeg4_amstream_dec_info.height);
-			pdata->dec_status = NULL;
-			vfree((void *)hw);
-			hw = NULL;
-			return -EFAULT;
-		}
-	}
+
 	mmpeg4_debug_print(DECODE_ID(hw), PRINT_FLAG_ERROR,
 		"W:%d,H:%d,rate=%d\n",
 	hw->vmpeg4_amstream_dec_info.width,

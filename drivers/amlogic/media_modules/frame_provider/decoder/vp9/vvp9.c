@@ -55,9 +55,6 @@
 #include "../utils/firmware.h"
 #include "../../../common/chips/decoder_cpu_ver_info.h"
 
-#include <trace/events/meson_atrace.h>
-
-
 #define MIX_STREAM_SUPPORT
 
 #include "vvp9.h"
@@ -6653,7 +6650,6 @@ static int prepare_display_buf(struct VP9Decoder_s *pbi,
 	u32 pts_valid = 0, pts_us64_valid = 0;
 	u32 pts_save;
 	u64 pts_us64_save;
-	u32 frame_size;
 
 	if (debug & VP9_DEBUG_BUFMGR)
 		pr_info("%s index = %d\r\n", __func__, pic_config->index);
@@ -6684,9 +6680,8 @@ static int prepare_display_buf(struct VP9Decoder_s *pbi,
 		 *   stream_offset, &vf->pts, 0) != 0) {
 		 */
 		if (pts_lookup_offset_us64
-			(PTS_TYPE_VIDEO, stream_offset, &vf->pts,
-			&frame_size, 0,
-			&vf->pts_us64) != 0) {
+			(PTS_TYPE_VIDEO, stream_offset, &vf->pts, 0,
+			 &vf->pts_us64) != 0) {
 #ifdef DEBUG_PTS
 			pbi->pts_missed++;
 #endif
@@ -6885,7 +6880,6 @@ static int prepare_display_buf(struct VP9Decoder_s *pbi,
 		inc_vf_ref(pbi, pic_config->index);
 		decoder_do_frame_check(hw_to_vdec(pbi), vf);
 		kfifo_put(&pbi->display_q, (const struct vframe_s *)vf);
-		ATRACE_COUNTER(MODULE_NAME, vf->pts);
 		pbi->vf_pre_count++;
 #ifndef CONFIG_AMLOGIC_MEDIA_MULTI_DEC
 		/*count info*/
@@ -7574,12 +7568,17 @@ static void vp9_set_clk(struct work_struct *work)
 	struct VP9Decoder_s *pbi = container_of(work,
 		struct VP9Decoder_s, work);
 
+	if (pbi->get_frame_dur && pbi->show_frame_num > 60 &&
+		pbi->frame_dur > 0 && pbi->saved_resolution !=
+		frame_width * frame_height *
+			(96000 / pbi->frame_dur)) {
 		int fps = 96000 / pbi->frame_dur;
 
 		if (hevc_source_changed(VFORMAT_VP9,
 			frame_width, frame_height, fps) > 0)
 			pbi->saved_resolution = frame_width *
 			frame_height * fps;
+	}
 }
 
 static void vvp9_put_timer_func(unsigned long arg)
@@ -7786,11 +7785,7 @@ static void vvp9_put_timer_func(unsigned long arg)
 		dbg_cmd = 0;
 	}
 	/*don't changed at start.*/
-	if (pbi->get_frame_dur && pbi->show_frame_num > 60 &&
-		pbi->frame_dur > 0 && pbi->saved_resolution !=
-		frame_width * frame_height *
-			(96000 / pbi->frame_dur))
-		schedule_work(&pbi->set_clk_work);
+	schedule_work(&pbi->set_clk_work);
 
 	timer->expires = jiffies + PUT_INTERVAL;
 	add_timer(timer);
@@ -8099,7 +8094,7 @@ static s32 vvp9_init(struct VP9Decoder_s *pbi)
 		return 0;
 	}
 #endif
-	hevc_enable_DMC(hw_to_vdec(pbi));
+
 	amhevc_enable();
 
 	ret = amhevc_loadmc_ex(VFORMAT_VP9, NULL, fw->data);

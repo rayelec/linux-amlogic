@@ -685,6 +685,8 @@ static int video_port_init(struct port_priv_s *priv,
 
 	pbuf->flag |= BUF_FLAG_IN_USE;
 
+	vdec_connect(priv->vdec);
+
 	return 0;
 }
 
@@ -1029,7 +1031,6 @@ static int amstream_port_release(struct port_priv_s *priv)
 	}
 
 	if (port->type & PORT_TYPE_MPTS) {
-		vdec_disconnect(priv->vdec);
 		tsync_pcr_stop();
 		tsdemux_release();
 	}
@@ -1856,11 +1857,10 @@ static long amstream_ioctl_get(struct port_priv_s *priv, ulong arg)
 		break;
 	case AMSTREAM_GET_APTS_LOOKUP:
 		if (this->type & PORT_TYPE_AUDIO) {
-			u32 pts = 0, frame_size, offset;
+			u32 pts = 0, offset;
 
 			offset = parm.data_32;
-			pts_lookup_offset(PTS_TYPE_AUDIO, offset, &pts,
-				&frame_size, 300);
+			pts_lookup_offset(PTS_TYPE_AUDIO, offset, &pts, 300);
 			parm.data_32 = pts;
 		}
 		break;
@@ -2269,34 +2269,6 @@ static long amstream_ioctl_set(struct port_priv_s *priv, ulong arg)
 	}
 	return r;
 }
-
-static enum E_ASPECT_RATIO  get_normalized_aspect_ratio(u32 ratio_control)
-{
-	enum E_ASPECT_RATIO euAspectRatio;
-
-	ratio_control = ratio_control >> DISP_RATIO_ASPECT_RATIO_BIT;
-
-	switch (ratio_control) {
-	case 0x8c:
-	case 0x90:
-		euAspectRatio = ASPECT_RATIO_16_9;
-		/*pr_info("ASPECT_RATIO_16_9\n");*/
-		break;
-	case 0xbb:
-	case 0xc0:
-		euAspectRatio = ASPECT_RATIO_4_3;
-		/*pr_info("ASPECT_RATIO_4_3\n");*/
-		break;
-	default:
-		euAspectRatio = ASPECT_UNDEFINED;
-		/*pr_info("ASPECT_UNDEFINED and ratio_control = 0x%x\n",
-			ratio_control);*/
-		break;
-	}
-
-	return euAspectRatio;
-}
-
 static long amstream_ioctl_get_ex(struct port_priv_s *priv, ulong arg)
 {
 	struct stream_port_s *this = priv->port;
@@ -2387,10 +2359,6 @@ static long amstream_ioctl_get_ex(struct port_priv_s *priv, ulong arg)
 			p->vstatus.fps = vstatus.frame_rate;
 			p->vstatus.error_count = vstatus.error_count;
 			p->vstatus.status = vstatus.status;
-			p->vstatus.euAspectRatio =
-				get_normalized_aspect_ratio(
-					vstatus.ratio_control);
-
 		}
 		break;
 	case AMSTREAM_GET_EX_ADECSTAT:
@@ -2574,20 +2542,6 @@ static long amstream_do_ioctl_new(struct port_priv_s *priv,
 			r = vdec_set_decinfo(priv->vdec, (void *)arg);
 		else
 			r = -EINVAL;
-		break;
-	case AMSTREAM_IOC_GET_QOSINFO:
-		{
-			struct av_param_qosinfo_t  __user *uarg = (void *)arg;
-			struct vframe_qos_s *qos_info = vdec_get_qos_info();
-			if (this->type & PORT_TYPE_VIDEO) {
-				if (qos_info != NULL && copy_to_user((void *)uarg->vframe_qos,
-							qos_info,
-							QOS_FRAME_NUM*sizeof(struct vframe_qos_s))) {
-					r = -EFAULT;
-					break;
-				}
-			}
-		}
 		break;
 	default:
 		r = -ENOIOCTLCMD;
@@ -2885,9 +2839,6 @@ static long amstream_do_ioctl_old(struct port_priv_s *priv,
 			p->vstatus.fps = vstatus.frame_rate;
 			p->vstatus.error_count = vstatus.error_count;
 			p->vstatus.status = vstatus.status;
-			p->vstatus.euAspectRatio =
-				get_normalized_aspect_ratio(
-					vstatus.ratio_control);
 
 			if (copy_to_user((void *)arg, p, sizeof(para)))
 				r = -EFAULT;
@@ -3150,11 +3101,10 @@ static long amstream_do_ioctl_old(struct port_priv_s *priv,
 
 	case AMSTREAM_IOC_APTS_LOOKUP:
 		if (this->type & PORT_TYPE_AUDIO) {
-			u32 pts = 0, frame_size, offset;
+			u32 pts = 0, offset;
 
 			get_user(offset, (unsigned long __user *)arg);
-			pts_lookup_offset(PTS_TYPE_AUDIO, offset, &pts,
-				&frame_size, 300);
+			pts_lookup_offset(PTS_TYPE_AUDIO, offset, &pts, 300);
 			put_user(pts, (int __user *)arg);
 		}
 		return 0;
@@ -3326,7 +3276,6 @@ static long amstream_do_ioctl(struct port_priv_s *priv,
 	case AMSTREAM_IOC_GET_PTR:
 	case AMSTREAM_IOC_SET_PTR:
 	case AMSTREAM_IOC_SYSINFO:
-	case AMSTREAM_IOC_GET_QOSINFO:
 		r = amstream_do_ioctl_new(priv, cmd, arg);
 		break;
 	default:

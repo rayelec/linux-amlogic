@@ -58,9 +58,6 @@
 #include <linux/uaccess.h>
 
 
-#include <trace/events/meson_atrace.h>
-
-
 #define DRIVER_NAME "amvdec_h264"
 #define MODULE_NAME "amvdec_h264"
 #define MEM_NAME "codec_264"
@@ -257,9 +254,6 @@ static u32 enable_userdata_debug;
 
 static unsigned int enable_switch_fense = 1;
 #define EN_SWITCH_FENCE() (enable_switch_fense && !is_4k)
-static struct vframe_qos_s s_vframe_qos;
-static int frame_count;
-
 #if 0
 static u32 vh264_no_disp_wd_count;
 #endif
@@ -306,36 +300,13 @@ static struct work_struct notify_work;
 static struct work_struct set_clk_work;
 static struct work_struct userdata_push_work;
 
-struct h264_qos_data_node_t {
-	struct list_head list;
 
-	uint32_t b_offset;
-	int poc;
-	/* picture qos infomation*/
-	int max_qp;
-	int avg_qp;
-	int min_qp;
-	int max_skip;
-	int avg_skip;
-	int min_skip;
-	int max_mv;
-	int min_mv;
-	int avg_mv;
-};
 
-/*qos data records list waiting for match with picture that be display*/
-static struct list_head picture_qos_list;
-/*free qos data records list*/
-static struct list_head free_qos_nodes_list;
-#define MAX_FREE_QOS_NODES		64
-static struct h264_qos_data_node_t free_nodes[MAX_FREE_QOS_NODES];
-static struct work_struct qos_work;
 static struct dec_sysinfo vh264_amstream_dec_info;
 static dma_addr_t mc_dma_handle;
 static void *mc_cpu_addr;
 static u32 first_offset;
 static u32 first_pts;
-static u32 first_frame_size;
 static u64 first_pts64;
 static bool first_pts_cached;
 static void *sei_data_buffer;
@@ -519,7 +490,6 @@ static void prepare_display_q(void)
 		if (kfifo_get(&delay_display_q, &vf)) {
 			kfifo_put(&display_q,
 				(const struct vframe_s *)vf);
-			ATRACE_COUNTER(MODULE_NAME, vf->pts);
 			vf_notify_receiver(PROVIDER_NAME,
 				VFRAME_EVENT_PROVIDER_VFRAME_READY, NULL);
 		}
@@ -1138,7 +1108,7 @@ static int vh264_user_data_read(struct vdec_s *vdec,
 	int copy_ok = 1;
 
 
-	pdest_buf = puserdata_para->pbuf_addr;
+	pdest_buf = (u8 *)puserdata_para->pbuf_addr;
 
 
 	mutex_lock(&userdata_mutex);
@@ -1335,458 +1305,6 @@ static void vh264_reset_userdata_fifo(struct vdec_s *vdec, int bInit)
 	mutex_unlock(&userdata_mutex);
 }
 
-static void h264_reset_qos_mgr(void)
-{
-	int i;
-
-	pr_info("h264_reset_qos_mgr\n");
-
-	INIT_LIST_HEAD(&free_qos_nodes_list);
-	INIT_LIST_HEAD(&picture_qos_list);
-
-	for (i = 0; i < MAX_FREE_QOS_NODES; i++) {
-		free_nodes[i].b_offset = 0xFFFFFFFF;
-
-		list_add_tail(&free_nodes[i].list,
-				&free_qos_nodes_list);
-	}
-}
-
-
-static void load_qos_data(int pic_number, uint32_t b_offset)
-{
-	uint32_t blk88_y_count;
-	uint32_t blk88_c_count;
-	uint32_t blk22_mv_count;
-	uint32_t rdata32;
-	int32_t mv_hi;
-	int32_t mv_lo;
-	uint32_t rdata32_l;
-	uint32_t mvx_L0_hi;
-	uint32_t mvy_L0_hi;
-	uint32_t mvx_L1_hi;
-	uint32_t mvy_L1_hi;
-	int64_t value;
-	uint64_t temp_value;
-/*
-#define DEBUG_QOS
-*/
-#define SUPPORT_NODE
-
-#ifdef SUPPORT_NODE
-	struct h264_qos_data_node_t *node;
-	struct h264_qos_data_node_t *tmp;
-	int bFoundNode = 0;
-
-	node = NULL;
-	if (!list_empty(&picture_qos_list)) {
-		list_for_each_entry_safe(node, tmp, &picture_qos_list, list) {
-			if (node->b_offset == b_offset) {
-				bFoundNode = 1;
-				break;
-			}
-		}
-	}
-	/*
-	pr_info("bFoundNode = %d, node:0x%p\n", bFoundNode, node);
-	*/
-	if (!bFoundNode) {
-		if (!list_empty(&free_qos_nodes_list)) {
-			node = list_entry(
-					free_qos_nodes_list.next,
-					struct h264_qos_data_node_t,
-					list);
-			/*
-			pr_info("get a node:0x%p\n", node);
-			*/
-		} else {
-			pr_info("there is no qos data node avaible\n");
-
-			return;
-		}
-	}
-
-	node->b_offset = b_offset;
-	node->poc = pic_number;
-
-	node->max_mv = 0;
-	node->avg_mv = 0;
-	node->min_mv = 0;
-
-	node->max_skip = 0;
-	node->avg_skip = 0;
-	node->min_skip = 0;
-
-	node->max_qp = 0;
-	node->avg_qp = 0;
-	node->min_qp = 0;
-#endif
-
-
-
-
-
-
-	/* set rd_idx to 0 */
-	WRITE_VREG(VDEC_PIC_QUALITY_CTRL, 0);
-	blk88_y_count = READ_VREG(VDEC_PIC_QUALITY_DATA);
-	if (blk88_y_count == 0) {
-#ifdef DEBUG_QOS
-		pr_info(" [Picture %d Quality] NO Data yet.\n",
-			pic_number);
-#endif
-		/* reset all counts */
-		WRITE_VREG(VDEC_PIC_QUALITY_CTRL, (1<<8));
-
-#ifdef SUPPORT_NODE
-		list_move(&node->list, &picture_qos_list);
-#endif
-		return;
-	}
-	/* qp_y_sum */
-	rdata32 = READ_VREG(VDEC_PIC_QUALITY_DATA);
-#ifdef DEBUG_QOS
-	pr_info(" [Picture %d Quality] Y QP AVG : %d (%d/%d)\n",
-		pic_number, rdata32/blk88_y_count,
-		rdata32, blk88_y_count);
-#endif
-#ifdef SUPPORT_NODE
-	node->avg_qp = rdata32/blk88_y_count;
-#endif
-
-	/* intra_y_count */
-	rdata32 = READ_VREG(VDEC_PIC_QUALITY_DATA);
-#ifdef DEBUG_QOS
-	pr_info(" [Picture %d Quality] Y intra rate : %d%c (%d)\n",
-		pic_number, rdata32*100/blk88_y_count,
-		'%', rdata32);
-#endif
-	/* skipped_y_count */
-	rdata32 = READ_VREG(VDEC_PIC_QUALITY_DATA);
-#ifdef DEBUG_QOS
-	pr_info(" [Picture %d Quality] Y skipped rate : %d%c (%d)\n",
-		pic_number, rdata32*100/blk88_y_count,
-		'%', rdata32);
-#endif
-#ifdef SUPPORT_NODE
-	node->avg_skip = rdata32*100/blk88_y_count;
-#endif
-	/* coeff_non_zero_y_count */
-	rdata32 = READ_VREG(VDEC_PIC_QUALITY_DATA);
-#ifdef DEBUG_QOS
-	pr_info(" [Picture %d Quality] Y ZERO_Coeff rate : %d%c (%d)\n",
-		pic_number, (100 - rdata32*100/(blk88_y_count*1)),
-		'%', rdata32);
-#endif
-	/* blk66_c_count */
-	blk88_c_count = READ_VREG(VDEC_PIC_QUALITY_DATA);
-	if (blk88_c_count == 0) {
-#ifdef DEBUG_QOS
-		pr_info(" [Picture %d Quality] NO Data yet.\n",
-			pic_number);
-#endif
-		/* reset all counts */
-		WRITE_VREG(VDEC_PIC_QUALITY_CTRL, (1<<8));
-
-#ifdef SUPPORT_NODE
-		list_move(&node->list, &picture_qos_list);
-#endif
-		return;
-	}
-	/* qp_c_sum */
-	rdata32 = READ_VREG(VDEC_PIC_QUALITY_DATA);
-#ifdef DEBUG_QOS
-	pr_info(" [Picture %d Quality] C QP AVG : %d (%d/%d)\n",
-		pic_number, rdata32/blk88_c_count,
-		rdata32, blk88_c_count);
-#endif
-	/* intra_c_count */
-	rdata32 = READ_VREG(VDEC_PIC_QUALITY_DATA);
-#ifdef DEBUG_QOS
-	pr_info(" [Picture %d Quality] C intra rate : %d%c (%d)\n",
-		pic_number, rdata32*100/blk88_c_count,
-		'%', rdata32);
-#endif
-	/* skipped_cu_c_count */
-	rdata32 = READ_VREG(VDEC_PIC_QUALITY_DATA);
-#ifdef DEBUG_QOS
-	pr_info(" [Picture %d Quality] C skipped rate : %d%c (%d)\n",
-		pic_number, rdata32*100/blk88_c_count,
-		'%', rdata32);
-#endif
-	/* coeff_non_zero_c_count */
-	rdata32 = READ_VREG(VDEC_PIC_QUALITY_DATA);
-#ifdef DEBUG_QOS
-	pr_info(" [Picture %d Quality] C ZERO_Coeff rate : %d%c (%d)\n",
-		pic_number, (100 - rdata32*100/(blk88_c_count*1)),
-		'%', rdata32);
-#endif
-
-	/* 1'h0, qp_c_max[6:0], 1'h0, qp_c_min[6:0],
-	1'h0, qp_y_max[6:0], 1'h0, qp_y_min[6:0] */
-	rdata32 = READ_VREG(VDEC_PIC_QUALITY_DATA);
-#ifdef DEBUG_QOS
-	pr_info(" [Picture %d Quality] Y QP min : %d\n",
-		pic_number, (rdata32>>0)&0xff);
-#endif
-#ifdef SUPPORT_NODE
-	node->min_qp = (rdata32>>0)&0xff;
-#endif
-
-#ifdef DEBUG_QOS
-	pr_info(" [Picture %d Quality] Y QP max : %d\n",
-		pic_number, (rdata32>>8)&0xff);
-#endif
-#ifdef SUPPORT_NODE
-	node->max_qp = (rdata32>>8)&0xff;
-#endif
-
-#ifdef DEBUG_QOS
-	pr_info(" [Picture %d Quality] C QP min : %d\n",
-		pic_number, (rdata32>>16)&0xff);
-	pr_info(" [Picture %d Quality] C QP max : %d\n",
-		pic_number, (rdata32>>24)&0xff);
-#endif
-
-	/* blk22_mv_count */
-	blk22_mv_count = READ_VREG(VDEC_PIC_QUALITY_DATA);
-	if (blk22_mv_count == 0) {
-#ifdef DEBUG_QOS
-		pr_info(" [Picture %d Quality] NO MV Data yet.\n",
-			pic_number);
-#endif
-		/* reset all counts */
-		WRITE_VREG(VDEC_PIC_QUALITY_CTRL, (1<<8));
-#ifdef SUPPORT_NODE
-		list_move(&node->list, &picture_qos_list);
-#endif
-		return;
-	}
-	/* mvy_L1_count[39:32], mvx_L1_count[39:32],
-	mvy_L0_count[39:32], mvx_L0_count[39:32] */
-	rdata32 = READ_VREG(VDEC_PIC_QUALITY_DATA);
-	/* should all be 0x00 or 0xff */
-#ifdef DEBUG_QOS
-	pr_info(" [Picture %d Quality] MV AVG High Bits: 0x%X\n",
-		pic_number, rdata32);
-#endif
-	mvx_L0_hi = ((rdata32>>0)&0xff);
-	mvy_L0_hi = ((rdata32>>8)&0xff);
-	mvx_L1_hi = ((rdata32>>16)&0xff);
-	mvy_L1_hi = ((rdata32>>24)&0xff);
-
-	/* mvx_L0_count[31:0] */
-	rdata32_l = READ_VREG(VDEC_PIC_QUALITY_DATA);
-	temp_value = mvx_L0_hi;
-	temp_value = (temp_value << 32) | rdata32_l;
-
-	if (mvx_L0_hi & 0x80)
-		value = 0xFFFFFFF000000000 | temp_value;
-	else
-		value = temp_value;
-	value = div_s64(value, blk22_mv_count);
-#ifdef DEBUG_QOS
-	pr_info(" [Picture %d Quality] MVX_L0 AVG : %d (%lld/%d)\n",
-		pic_number, (int)(value),
-		value, blk22_mv_count);
-#endif
-#ifdef SUPPORT_NODE
-	node->avg_mv = value;
-#endif
-
-	/* mvy_L0_count[31:0] */
-	rdata32_l = READ_VREG(VDEC_PIC_QUALITY_DATA);
-	temp_value = mvy_L0_hi;
-	temp_value = (temp_value << 32) | rdata32_l;
-
-	if (mvy_L0_hi & 0x80)
-		value = 0xFFFFFFF000000000 | temp_value;
-	else
-		value = temp_value;
-#ifdef DEBUG_QOS
-	pr_info(" [Picture %d Quality] MVY_L0 AVG : %d (%lld/%d)\n",
-		pic_number, rdata32_l/blk22_mv_count,
-		value, blk22_mv_count);
-#endif
-
-	/* mvx_L1_count[31:0] */
-	rdata32_l = READ_VREG(VDEC_PIC_QUALITY_DATA);
-	temp_value = mvx_L1_hi;
-	temp_value = (temp_value << 32) | rdata32_l;
-	if (mvx_L1_hi & 0x80)
-		value = 0xFFFFFFF000000000 | temp_value;
-	else
-		value = temp_value;
-#ifdef DEBUG_QOS
-	pr_info(" [Picture %d Quality] MVX_L1 AVG : %d (%lld/%d)\n",
-		pic_number, rdata32_l/blk22_mv_count,
-		value, blk22_mv_count);
-#endif
-
-	/* mvy_L1_count[31:0] */
-	rdata32_l = READ_VREG(VDEC_PIC_QUALITY_DATA);
-	temp_value = mvy_L1_hi;
-	temp_value = (temp_value << 32) | rdata32_l;
-	if (mvy_L1_hi & 0x80)
-		value = 0xFFFFFFF000000000 | temp_value;
-	else
-		value = temp_value;
-#ifdef DEBUG_QOS
-	pr_info(" [Picture %d Quality] MVY_L1 AVG : %d (%lld/%d)\n",
-		pic_number, rdata32_l/blk22_mv_count,
-		value, blk22_mv_count);
-#endif
-
-	/* {mvx_L0_max, mvx_L0_min} // format : {sign, abs[14:0]}  */
-	rdata32 = READ_VREG(VDEC_PIC_QUALITY_DATA);
-	mv_hi = (rdata32>>16)&0xffff;
-	if (mv_hi & 0x8000)
-		mv_hi = 0x8000 - mv_hi;
-#ifdef DEBUG_QOS
-	pr_info(" [Picture %d Quality] MVX_L0 MAX : %d\n",
-		pic_number, mv_hi);
-#endif
-#ifdef SUPPORT_NODE
-	node->max_mv = mv_hi;
-#endif
-
-	mv_lo = (rdata32>>0)&0xffff;
-	if (mv_lo & 0x8000)
-		mv_lo = 0x8000 - mv_lo;
-#ifdef DEBUG_QOS
-	pr_info(" [Picture %d Quality] MVX_L0 MIN : %d\n",
-		pic_number, mv_lo);
-#endif
-#ifdef SUPPORT_NODE
-	node->min_mv = mv_lo;
-#endif
-
-	/* {mvy_L0_max, mvy_L0_min} */
-	rdata32 = READ_VREG(VDEC_PIC_QUALITY_DATA);
-	mv_hi = (rdata32>>16)&0xffff;
-	if (mv_hi & 0x8000)
-		mv_hi = 0x8000 - mv_hi;
-#ifdef DEBUG_QOS
-	pr_info(" [Picture %d Quality] MVY_L0 MAX : %d\n",
-		pic_number, mv_hi);
-#endif
-
-	mv_lo = (rdata32>>0)&0xffff;
-	if (mv_lo & 0x8000)
-		mv_lo = 0x8000 - mv_lo;
-#ifdef DEBUG_QOS
-	pr_info(" [Picture %d Quality] MVY_L0 MIN : %d\n",
-		pic_number, mv_lo);
-#endif
-
-	/* {mvx_L1_max, mvx_L1_min} */
-	rdata32 = READ_VREG(VDEC_PIC_QUALITY_DATA);
-	mv_hi = (rdata32>>16)&0xffff;
-	if (mv_hi & 0x8000)
-		mv_hi = 0x8000 - mv_hi;
-#ifdef DEBUG_QOS
-	pr_info(" [Picture %d Quality] MVX_L1 MAX : %d\n",
-		pic_number, mv_hi);
-#endif
-
-	mv_lo = (rdata32>>0)&0xffff;
-	if (mv_lo & 0x8000)
-		mv_lo = 0x8000 - mv_lo;
-#ifdef DEBUG_QOS
-	pr_info(" [Picture %d Quality] MVX_L1 MIN : %d\n",
-		pic_number, mv_lo);
-#endif
-
-	/* {mvy_L1_max, mvy_L1_min} */
-	rdata32 = READ_VREG(VDEC_PIC_QUALITY_DATA);
-	mv_hi = (rdata32>>16)&0xffff;
-	if (mv_hi & 0x8000)
-		mv_hi = 0x8000 - mv_hi;
-#ifdef DEBUG_QOS
-	pr_info(" [Picture %d Quality] MVY_L1 MAX : %d\n",
-		pic_number, mv_hi);
-#endif
-	mv_lo = (rdata32>>0)&0xffff;
-	if (mv_lo & 0x8000)
-		mv_lo = 0x8000 - mv_lo;
-#ifdef DEBUG_QOS
-	pr_info(" [Picture %d Quality] MVY_L1 MIN : %d\n",
-		pic_number, mv_lo);
-#endif
-
-	rdata32 = READ_VREG(VDEC_PIC_QUALITY_CTRL);
-#ifdef DEBUG_QOS
-	pr_info(" [Picture %d Quality] After Read : VDEC_PIC_QUALITY_CTRL : 0x%x\n",
-		pic_number, rdata32);
-#endif
-	/* reset all counts */
-	WRITE_VREG(VDEC_PIC_QUALITY_CTRL, (1<<8));
-#ifdef SUPPORT_NODE
-	list_move(&node->list, &picture_qos_list);
-#endif
-}
-
-void search_qos_node(struct vframe_qos_s *picture_qos, uint32_t b_offset)
-{
-	struct h264_qos_data_node_t *node;
-	struct h264_qos_data_node_t *tmp;
-
-	if (!list_empty(&picture_qos_list)) {
-		list_for_each_entry_safe(node, tmp, &picture_qos_list, list) {
-			if (node->b_offset == b_offset) {
-
-				picture_qos->avg_mv = node->avg_mv;
-				picture_qos->min_mv = node->min_mv;
-				picture_qos->max_mv = node->max_mv;
-
-				picture_qos->avg_skip = node->avg_skip;
-				picture_qos->min_skip = node->min_skip;
-				picture_qos->max_skip = node->max_skip;
-
-				picture_qos->avg_qp = node->avg_qp;
-				picture_qos->min_qp = node->min_qp;
-				picture_qos->max_qp = node->max_qp;
-
-#if 0
-				pr_info("POC:%d, mv: max:%d,  avg:%d, min:%d\n"
-					"qp: max:%d,  avg:%d, min:%d\n"
-					"skip: max:%d,  avg:%d, min:%d\n",
-					node->poc,
-					picture_qos->max_mv,
-					picture_qos->avg_mv,
-					picture_qos->min_mv,
-					picture_qos->max_qp,
-					picture_qos->avg_qp,
-					picture_qos->min_qp,
-					picture_qos->max_skip,
-					picture_qos->avg_skip,
-					picture_qos->min_skip);
-#endif
-				node->b_offset = 0xFFFFFFFF;
-				list_move(&node->list, &free_qos_nodes_list);
-
-				break;
-			}
-		}
-	}
-}
-
-static void qos_do_work(struct work_struct *work)
-{
-	uint32_t poc;
-	uint32_t bOffset;
-
-
-	poc = READ_VREG(AV_SCRATCH_M);
-	bOffset = READ_VREG(AV_SCRATCH_L);
-/*
-	pr_info("poc:%d, bOffset:0x%x\n", poc, bOffset);
-*/
-	load_qos_data(poc, bOffset);
-
-
-	WRITE_VREG(AV_SCRATCH_0, 0);
-}
 
 static void userdata_push_do_work(struct work_struct *work)
 {
@@ -2562,12 +2080,9 @@ static void vh264_isr(void)
 	unsigned int cpu_cmd;
 	unsigned int pts, pts_lookup_save, pts_valid_save, pts_valid = 0;
 	unsigned int pts_us64_valid = 0;
-	unsigned int  framesize;
 	u64 pts_us64;
 	bool force_interlaced_frame = false;
-#ifdef ENABLE_SEI_ITU_T35
 	unsigned int sei_itu35_flags;
-#endif
 	static const unsigned int idr_num =
 		FIX_FRAME_RATE_CHECK_IDRFRAME_NUM;
 	static const unsigned int flg_1080_itl =
@@ -2747,7 +2262,6 @@ static void vh264_isr(void)
 				 && (first_pts_cached))) {
 				pts = first_pts;
 				pts_us64 = first_pts64;
-				framesize = first_frame_size;
 				first_pts_cached = false;
 				pts_valid = 1;
 				pts_us64_valid = 1;
@@ -2755,8 +2269,8 @@ static void vh264_isr(void)
 				pts_hit++;
 #endif
 			} else if (pts_lookup_offset_us64
-					(PTS_TYPE_VIDEO, b_offset, &pts,
-					&framesize, 0, &pts_us64) == 0) {
+					   (PTS_TYPE_VIDEO, b_offset, &pts, 0,
+						&pts_us64) == 0) {
 				pts_valid = 1;
 				pts_us64_valid = 1;
 #ifdef DEBUG_PTS
@@ -2765,99 +2279,10 @@ static void vh264_isr(void)
 			} else {
 				pts_valid = 0;
 				pts_us64_valid = 0;
-				framesize = 0;
 #ifdef DEBUG_PTS
 				pts_missed++;
 #endif
 			}
-
-			if (idr_flag)
-				s_vframe_qos.type = 4;
-			else if (slice_type == SLICE_TYPE_I)
-				s_vframe_qos.type = 1;
-			else if (slice_type == SLICE_TYPE_P)
-				s_vframe_qos.type = 2;
-			else if (slice_type == SLICE_TYPE_B || slice_type == 8)
-				s_vframe_qos.type = 3;
-
-			s_vframe_qos.size = framesize;
-
-			if (pts_valid)
-				s_vframe_qos.pts = pts;
-			else
-				s_vframe_qos.pts = last_pts + DUR2PTS(frame_dur);
-#ifndef ENABLE_SEI_ITU_T35
-			if (get_cpu_major_id() < AM_MESON_CPU_MAJOR_ID_G12A) {
-				u32 reg_data;
-				if (i) {
-					reg_data = READ_VREG(AV_SCRATCH_N);
-					s_vframe_qos.max_mv
-						= (reg_data >> 16) & 0xffff;
-					s_vframe_qos.avg_mv
-						= (reg_data >> 8) & 0xff;
-					s_vframe_qos.min_mv
-						=  reg_data & 0xff;
-					reg_data = READ_VREG(AV_SCRATCH_L);
-					s_vframe_qos.max_qp
-						= (reg_data >> 16) & 0xff;
-					s_vframe_qos.avg_qp
-						= (reg_data >> 8) & 0xff;
-					s_vframe_qos.min_qp
-						=  reg_data & 0xff;
-					reg_data = READ_VREG(AV_SCRATCH_M);
-					s_vframe_qos.max_skip
-						= (reg_data >> 16) & 0xff;
-					s_vframe_qos.avg_skip
-						= (reg_data >> 8) & 0xff;
-					s_vframe_qos.min_skip
-						=  reg_data & 0xff;
-				} else {
-					reg_data = READ_VREG(AV_SCRATCH_J);
-					s_vframe_qos.max_mv
-						= (reg_data >> 16) & 0xffff;
-					s_vframe_qos.avg_mv
-						= (reg_data >> 8) & 0xff;
-					s_vframe_qos.min_mv
-						=  reg_data & 0xff;
-					reg_data = READ_VREG(AV_SCRATCH_I);
-					s_vframe_qos.max_qp
-						= (reg_data >> 16) & 0xff;
-					s_vframe_qos.avg_qp
-						= (reg_data >> 8) & 0xff;
-					s_vframe_qos.min_qp
-						=  reg_data & 0xff;
-					reg_data = READ_VREG(AV_SCRATCH_K);
-					s_vframe_qos.max_skip
-						= (reg_data >> 16) & 0xff;
-					s_vframe_qos.avg_skip
-						= (reg_data >> 8) & 0xff;
-					s_vframe_qos.min_skip
-						=  reg_data & 0xff;
-				}
-				if (decoder_debug_flag&0x2) {
-					pr_info("max_mv %d    avg_mv %d  min_mv %d slice_type %d offset %x   i =  %d\n",
-						s_vframe_qos.max_mv,
-						s_vframe_qos.avg_mv,
-						s_vframe_qos.min_mv,
-						slice_type,
-						b_offset,
-						i);
-					pr_info("max_qp %d    avg_qp %d  min_qp %d\n",
-						s_vframe_qos.max_qp,
-						s_vframe_qos.avg_qp,
-						s_vframe_qos.min_qp);
-					pr_info("max_skip %d  avg_skip %d  min_skip %d\n",
-						s_vframe_qos.max_skip,
-						s_vframe_qos.avg_skip,
-						s_vframe_qos.min_skip);
-				}
-			} else
-				search_qos_node(&s_vframe_qos, b_offset);
-#endif
-			frame_count++;
-
-			s_vframe_qos.num = frame_count;
-			vdec_fill_frame_info(&s_vframe_qos, 1);
 
 			/* on second IDR frame,check the diff between pts
 			 *  compute from duration and pts from lookup ,
@@ -3218,14 +2643,12 @@ static void vh264_isr(void)
 	} else if ((cpu_cmd & 0xff) == 9) {
 		first_offset = READ_VREG(AV_SCRATCH_1);
 		if (pts_lookup_offset_us64
-			(PTS_TYPE_VIDEO, first_offset, &first_pts,
-			&first_frame_size, 0,
+			(PTS_TYPE_VIDEO, first_offset, &first_pts, 0,
 			 &first_pts64) == 0)
 			first_pts_cached = true;
 		WRITE_VREG(AV_SCRATCH_0, 0);
 	} else if ((cpu_cmd & 0xff) == 0xa) {
 		int b_offset;
-		unsigned int frame_size;
 
 		b_offset = READ_VREG(AV_SCRATCH_2);
 		buffer_index = READ_VREG(AV_SCRATCH_1);
@@ -3239,8 +2662,7 @@ static void vh264_isr(void)
 			return IRQ_HANDLED;
 		}
 		if (pts_lookup_offset_us64 (PTS_TYPE_VIDEO, b_offset,
-				&pts, &frame_size,
-				0, &pts_us64) != 0)
+				&pts, 0, &pts_us64) != 0)
 			vf->pts_us64 = vf->pts = 0;
 		else {
 			vf->pts_us64 = pts_us64;
@@ -3267,15 +2689,12 @@ static void vh264_isr(void)
 		kfifo_put(&delay_display_q,
 			(const struct vframe_s *)vf);
 		WRITE_VREG(AV_SCRATCH_0, 0);
-	} else if ((cpu_cmd & 0xff) == 0xB) {
-		schedule_work(&qos_work);
 	}
-#ifdef ENABLE_SEI_ITU_T35
+
 	sei_itu35_flags = READ_VREG(AV_SCRATCH_J);
 	if (sei_itu35_flags & (1 << 15)) {	/* data ready */
 		schedule_work(&userdata_push_work);
 	}
-#endif
 #ifdef HANDLE_H264_IRQ
 	return IRQ_HANDLED;
 #else
@@ -3285,6 +2704,10 @@ static void vh264_isr(void)
 
 static void vh264_set_clk(struct work_struct *work)
 {
+	if (ucode_type != UCODE_IP_ONLY_PARAM &&
+		(clk_adj_frame_count > VDEC_CLOCK_ADJUST_FRAME) &&
+		frame_dur > 0 && saved_resolution !=
+		frame_width * frame_height * (96000 / frame_dur)) {
 		int fps = 96000 / frame_dur;
 
 		if (frame_dur < 10) /*dur is too small ,think it errors fps*/
@@ -3292,6 +2715,7 @@ static void vh264_set_clk(struct work_struct *work)
 		saved_resolution = frame_width * frame_height * fps;
 		vdec_source_changed(VFORMAT_H264,
 			frame_width, frame_height, fps);
+	}
 }
 
 static void vh264_put_timer_func(unsigned long arg)
@@ -3419,11 +2843,7 @@ static void vh264_put_timer_func(unsigned long arg)
 			stream_switching_done();
 	}
 
-	if (ucode_type != UCODE_IP_ONLY_PARAM &&
-		(clk_adj_frame_count > VDEC_CLOCK_ADJUST_FRAME) &&
-		frame_dur > 0 && saved_resolution !=
-		frame_width * frame_height * (96000 / frame_dur))
-		schedule_work(&set_clk_work);
+	schedule_work(&set_clk_work);
 
 exit:
 	timer->expires = jiffies + PUT_INTERVAL;
@@ -3433,9 +2853,6 @@ exit:
 
 int vh264_dec_status(struct vdec_s *vdec, struct vdec_info *vstatus)
 {
-	u32 ratio_control;
-	u32 ar;
-
 	if (!(stat & STAT_VDEC_RUN))
 		return -1;
 
@@ -3459,13 +2876,6 @@ int vh264_dec_status(struct vdec_s *vdec, struct vdec_info *vstatus)
 	vstatus->total_data = gvs->total_data;
 	vstatus->samp_cnt = gvs->samp_cnt;
 	vstatus->offset = gvs->offset;
-	ar = min_t(u32,
-			h264_ar,
-			DISP_RATIO_ASPECT_RATIO_MAX);
-	ratio_control =
-		ar << DISP_RATIO_ASPECT_RATIO_BIT;
-	vstatus->ratio_control = ratio_control;
-
 	snprintf(vstatus->vdec_name, sizeof(vstatus->vdec_name),
 		"%s", DRIVER_NAME);
 
@@ -3704,7 +3114,6 @@ static int vh264_local_init(void)
 	no_idr_error_count = 0;
 
 	vh264_reset_userdata_fifo(vdec_h264, 1);
-	h264_reset_qos_mgr();
 
 	if (enable_switch_fense) {
 		for (i = 0; i < ARRAY_SIZE(fense_buffer_spec); i++) {
@@ -3752,8 +3161,6 @@ static s32 vh264_init(void)
 	iponly_early_mode = 0;
 	saved_idc_level = 0;
 
-	frame_count = 0;
-	memset(&s_vframe_qos, 0, sizeof(s_vframe_qos));
 	/*init vdec status*/
 	ret = vh264_vdec_info_init();
 	if (0 != ret)
@@ -3916,12 +3323,11 @@ static s32 vh264_init(void)
 #endif
 
 	if (frame_dur != 0) {
-		if (!is_reset) {
+		if (!is_reset)
 			vf_notify_receiver(PROVIDER_NAME,
 					VFRAME_EVENT_PROVIDER_FR_HINT,
 					(void *)((unsigned long)frame_dur));
-			fr_hint_status = VDEC_HINTED;
-		}
+		fr_hint_status = VDEC_HINTED;
 	} else
 		fr_hint_status = VDEC_NEED_HINT;
 
@@ -3973,7 +3379,7 @@ static int vh264_stop(int mode)
 
 	if (stat & STAT_VF_HOOK) {
 		if (mode == MODE_FULL) {
-			if (fr_hint_status == VDEC_HINTED)
+			if (fr_hint_status == VDEC_HINTED && !is_reset)
 				vf_notify_receiver(PROVIDER_NAME,
 					VFRAME_EVENT_PROVIDER_FR_END_HINT,
 					NULL);
@@ -4011,27 +3417,9 @@ static int vh264_stop(int mode)
 	return 0;
 }
 
-static void wait_vh264_search_done(void)
-{
-	u32 vld_rp = READ_VREG(VLD_MEM_VIFIFO_RP);
-	int count = 0;
-	do {
-		usleep_range(100, 500);
-		if (vld_rp == READ_VREG(VLD_MEM_VIFIFO_RP))
-			break;
-		if (count > 2000) {
-			pr_info("%s, timeout  count %d vld_rp 0x%x VLD_MEM_VIFIFO_RP 0x%x\n",
-					__func__, count, vld_rp, READ_VREG(VLD_MEM_VIFIFO_RP));
-			break;
-		} else
-			vld_rp = READ_VREG(VLD_MEM_VIFIFO_RP);
-		count++;
-	} while (1);
-}
-
-
 static void error_do_work(struct work_struct *work)
 {
+	mutex_lock(&vh264_mutex);
 
 	/*
 	 * we need to lock vh264_stop/vh264_init.
@@ -4042,9 +3430,8 @@ static void error_do_work(struct work_struct *work)
 	if (atomic_read(&vh264_active)) {
 		amvdec_stop();
 		do {
-			msleep(50);
+			msleep(20);
 		} while (vh264_stream_switching_state != SWITCHING_STATE_OFF);
-		wait_vh264_search_done();
 		vh264_reset  = 1;
 #ifdef CONFIG_AMLOGIC_POST_PROCESS_MANAGER
 		vh264_ppmgr_reset();
@@ -4055,10 +3442,14 @@ static void error_do_work(struct work_struct *work)
 
 		vf_reg_provider(&vh264_vf_prov);
 #endif
+		msleep(30);
 		vh264_prot_init();
+
 		amvdec_start();
 		vh264_reset  = 0;
 	}
+
+	mutex_unlock(&vh264_mutex);
 }
 
 static void stream_switching_done(void)
@@ -4119,7 +3510,6 @@ static void stream_switching_do(struct work_struct *work)
 		if (kfifo_get(&delay_display_q, &vf)) {
 			kfifo_put(&display_q,
 				(const struct vframe_s *)vf);
-			ATRACE_COUNTER(MODULE_NAME, vf->pts);
 			vf_notify_receiver(PROVIDER_NAME,
 				VFRAME_EVENT_PROVIDER_VFRAME_READY, NULL);
 		} else
@@ -4201,7 +3591,7 @@ static void stream_switching_do(struct work_struct *work)
 		/* send clone to receiver */
 		kfifo_put(&display_q,
 			(const struct vframe_s *)&fense_vf[i]);
-		ATRACE_COUNTER(MODULE_NAME, fense_vf[i].pts);
+
 		/* early recycle frames for last session */
 		if (delay)
 			vh264_vf_put(vf, NULL);
@@ -4284,9 +3674,6 @@ static int amvdec_h264_probe(struct platform_device *pdev)
 	INIT_WORK(&notify_work, vh264_notify_work);
 	INIT_WORK(&set_clk_work, vh264_set_clk);
 	INIT_WORK(&userdata_push_work, userdata_push_do_work);
-	INIT_WORK(&qos_work, qos_do_work);
-
-
 
 	atomic_set(&vh264_active, 1);
 
@@ -4302,13 +3689,13 @@ static int amvdec_h264_remove(struct platform_device *pdev)
 	cancel_work_sync(&error_wd_work);
 	cancel_work_sync(&stream_switching_work);
 	cancel_work_sync(&notify_work);
+	cancel_work_sync(&set_clk_work);
 	cancel_work_sync(&userdata_push_work);
-	cancel_work_sync(&qos_work);
 
-
+	mutex_lock(&vh264_mutex);
 	vh264_stop(MODE_FULL);
-	wait_vh264_search_done();
 	vdec_source_changed(VFORMAT_H264, 0, 0, 0);
+
 #ifdef DUMP_USER_DATA
 	vh264_dump_userdata();
 #endif
@@ -4323,7 +3710,6 @@ static int amvdec_h264_remove(struct platform_device *pdev)
 #endif
 	kfree(gvs);
 	gvs = NULL;
-	cancel_work_sync(&set_clk_work);
 	mutex_unlock(&vh264_mutex);
 	return 0;
 }
@@ -4406,9 +3792,6 @@ module_param(sync_outside, uint, 0664);
 MODULE_PARM_DESC(sync_outside, "\n amvdec_h264 sync_outside\n");
 module_param(dec_control, uint, 0664);
 MODULE_PARM_DESC(dec_control, "\n amvdec_h264 decoder control\n");
-module_param(frame_count, uint, 0664);
-MODULE_PARM_DESC(frame_count,
-       "\n amvdec_h264 decoded total count\n");
 module_param(fatal_error_reset, uint, 0664);
 MODULE_PARM_DESC(fatal_error_reset,
 		"\n amvdec_h264 decoder reset when fatal error happens\n");
