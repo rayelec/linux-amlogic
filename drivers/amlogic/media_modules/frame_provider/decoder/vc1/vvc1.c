@@ -43,6 +43,7 @@
 #include "../utils/firmware.h"
 #include <linux/amlogic/tee.h>
 #include <linux/delay.h>
+#include <trace/events/meson_atrace.h>
 
 
 #define DRIVER_NAME "amvdec_vc1"
@@ -52,6 +53,8 @@
 #if 1	/* //MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON6 */
 #define NV21
 #endif
+
+#define VC1_MAX_SUPPORT_SIZE (1920*1088)
 
 #define I_PICTURE   0
 #define P_PICTURE   1
@@ -279,6 +282,7 @@ static irqreturn_t vvc1_isr(int irq, void *dev_id)
 	unsigned int pts, pts_valid = 0, offset = 0;
 	u32 v_width, v_height;
 	u64 pts_us64 = 0;
+	u32 frame_size;
 
 	reg = READ_VREG(VC1_BUFFEROUT);
 
@@ -305,7 +309,8 @@ static irqreturn_t vvc1_isr(int irq, void *dev_id)
 			offset = READ_VREG(VC1_OFFSET_REG);
 			if (pts_lookup_offset_us64(
 					PTS_TYPE_VIDEO,
-					offset, &pts, 0, &pts_us64) == 0) {
+					offset, &pts, &frame_size,
+					0, &pts_us64) == 0) {
 				pts_valid = 1;
 #ifdef DEBUG_PTS
 				pts_hit++;
@@ -493,6 +498,7 @@ static irqreturn_t vvc1_isr(int irq, void *dev_id)
 					buffer_index);
 
 			kfifo_put(&display_q, (const struct vframe_s *)vf);
+			ATRACE_COUNTER(MODULE_NAME, vf->pts);
 
 			vf_notify_receiver(
 				PROVIDER_NAME,
@@ -552,6 +558,7 @@ static irqreturn_t vvc1_isr(int irq, void *dev_id)
 					buffer_index);
 
 			kfifo_put(&display_q, (const struct vframe_s *)vf);
+			ATRACE_COUNTER(MODULE_NAME, vf->pts);
 
 			vf_notify_receiver(
 					PROVIDER_NAME,
@@ -636,6 +643,7 @@ static irqreturn_t vvc1_isr(int irq, void *dev_id)
 					mm_blk_handle,
 					buffer_index);
 			kfifo_put(&display_q, (const struct vframe_s *)vf);
+			ATRACE_COUNTER(MODULE_NAME, vf->pts);
 
 			vf_notify_receiver(PROVIDER_NAME,
 					VFRAME_EVENT_PROVIDER_VFRAME_READY,
@@ -984,14 +992,12 @@ static void vvc1_ppmgr_reset(void)
 
 static void vvc1_set_clk(struct work_struct *work)
 {
-	if (frame_dur > 0 && saved_resolution !=
-		frame_width * frame_height * (96000 / frame_dur)) {
 		int fps = 96000 / frame_dur;
 
 		saved_resolution = frame_width * frame_height * fps;
 		vdec_source_changed(VFORMAT_VC1,
 			frame_width, frame_height, fps);
-	}
+
 }
 
 static void error_do_work(struct work_struct *work)
@@ -1030,7 +1036,10 @@ static void vvc1_put_timer_func(unsigned long arg)
 			kfifo_put(&newframe_q, (const struct vframe_s *)vf);
 		}
 	}
-	schedule_work(&set_clk_work);
+
+	if (frame_dur > 0 && saved_resolution !=
+		frame_width * frame_height * (96000 / frame_dur))
+		schedule_work(&set_clk_work);
 	timer->expires = jiffies + PUT_INTERVAL;
 
 	add_timer(timer);
@@ -1144,9 +1153,18 @@ static int amvdec_vc1_probe(struct platform_device *pdev)
 		return -EFAULT;
 	}
 
-	if (pdata->sys_info)
+	if (pdata->sys_info) {
 		vvc1_amstream_dec_info = *pdata->sys_info;
 
+		if ((vvc1_amstream_dec_info.height != 0) &&
+			(vvc1_amstream_dec_info.width >
+			(VC1_MAX_SUPPORT_SIZE/vvc1_amstream_dec_info.height))) {
+			pr_info("amvdec_vc1: over size, unsupport: %d * %d\n",
+				vvc1_amstream_dec_info.width,
+				vvc1_amstream_dec_info.height);
+			return -EFAULT;
+		}
+	}
 	pdata->dec_status = vvc1_dec_status;
 	pdata->set_isreset = vvc1_set_isreset;
 	is_reset = 0;
@@ -1169,7 +1187,6 @@ static int amvdec_vc1_probe(struct platform_device *pdev)
 static int amvdec_vc1_remove(struct platform_device *pdev)
 {
 	cancel_work_sync(&error_wd_work);
-	cancel_work_sync(&set_clk_work);
 	if (stat & STAT_VDEC_RUN) {
 		amvdec_stop();
 		stat &= ~STAT_VDEC_RUN;
@@ -1185,6 +1202,7 @@ static int amvdec_vc1_remove(struct platform_device *pdev)
 		stat &= ~STAT_TIMER_ARM;
 	}
 
+	cancel_work_sync(&set_clk_work);
 	if (stat & STAT_VF_HOOK) {
 		if (!is_reset)
 			vf_notify_receiver(PROVIDER_NAME,

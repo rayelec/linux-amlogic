@@ -120,6 +120,7 @@ extern void dma_contiguous_early_fixup(phys_addr_t base, unsigned long size);
 unsigned int get_vdec_clk_config_settings(void);
 void update_vdec_clk_config_settings(unsigned int config);
 //unsigned int get_mmu_mode(void);//DEBUG_TMP
+extern void vdec_fill_frame_info(struct vframe_qos_s *vframe_qos, int debug);
 
 struct vdec_s;
 enum vformat_t;
@@ -201,6 +202,7 @@ struct vdec_s {
 	/* input */
 	struct vdec_input_s input;
 
+	/*frame check*/
 	struct pic_check_mgr_t vfc;
 
 	/* mc cache */
@@ -419,6 +421,7 @@ extern void vdec_set_step_mode(void);
 
 extern void vdec_disable_DMC(struct vdec_s *vdec);
 extern void vdec_enable_DMC(struct vdec_s *vdec);
+extern void hevc_enable_DMC(struct vdec_s *vdec);
 
 int vdec_read_user_data(struct vdec_s *vdec,
 				struct userdata_param_t *p_userdata_param);
@@ -440,8 +443,7 @@ int vdec_get_status(struct vdec_s *vdec);
 
 void vdec_set_timestamp(struct vdec_s *vdec, u64 timestamp);
 
-struct vdec_s *vdec_get_with_id(unsigned id);
+struct vdec_s *vdec_get_with_id(unsigned int id);
 
-void *vdec_get_active_vfc(int core_mask);
-
+extern struct vframe_qos_s *vdec_get_qos_info(void);
 #endif				/* VDEC_H */

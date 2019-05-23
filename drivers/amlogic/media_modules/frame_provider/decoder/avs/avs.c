@@ -45,6 +45,9 @@
 #include "../../../common/chips/decoder_cpu_ver_info.h"
 #include <linux/amlogic/tee.h>
 
+
+#include <trace/events/meson_atrace.h>
+
 #define DRIVER_NAME "amvdec_avs"
 #define MODULE_NAME "amvdec_avs"
 
@@ -423,6 +426,7 @@ static void vavs_isr(void)
 	u32 repeat_count;
 	u32 picture_type;
 	u32 buffer_index;
+	u32 frame_size;
 	bool force_interlaced_frame = false;
 	unsigned int pts, pts_valid = 0, offset = 0;
 	u64 pts_us64;
@@ -457,6 +461,7 @@ static void vavs_isr(void)
 			if (debug_flag & AVS_DEBUG_PRINT)
 				pr_info("AVS OFFSET=%x\n", offset);
 			if (pts_lookup_offset_us64(PTS_TYPE_VIDEO, offset, &pts,
+				&frame_size,
 				0, &pts_us64) == 0) {
 				pts_valid = 1;
 #ifdef DEBUG_PTS
@@ -581,9 +586,10 @@ static void vavs_isr(void)
 				decoder_bmmu_box_get_mem_handle(
 					mm_blk_handle,
 					buffer_index);
-
+			decoder_do_frame_check(NULL, vf);
 			kfifo_put(&display_q,
 					  (const struct vframe_s *)vf);
+			ATRACE_COUNTER(MODULE_NAME, vf->pts);
 			vf_notify_receiver(PROVIDER_NAME,
 					VFRAME_EVENT_PROVIDER_VFRAME_READY,
 					NULL);
@@ -642,6 +648,7 @@ static void vavs_isr(void)
 
 			kfifo_put(&display_q,
 					  (const struct vframe_s *)vf);
+			ATRACE_COUNTER(MODULE_NAME, vf->pts);
 			vf_notify_receiver(PROVIDER_NAME,
 					VFRAME_EVENT_PROVIDER_VFRAME_READY,
 					NULL);
@@ -717,8 +724,10 @@ static void vavs_isr(void)
 				decoder_bmmu_box_get_mem_handle(
 					mm_blk_handle,
 					buffer_index);
+			decoder_do_frame_check(NULL, vf);
 			kfifo_put(&display_q,
 					  (const struct vframe_s *)vf);
+			ATRACE_COUNTER(MODULE_NAME, vf->pts);
 			vf_notify_receiver(PROVIDER_NAME,
 					VFRAME_EVENT_PROVIDER_VFRAME_READY,
 					NULL);
@@ -849,6 +858,7 @@ static int vavs_canvas_init(void)
 	u32 decbuf_size, decbuf_y_size, decbuf_uv_size;
 	unsigned long buf_start;
 	int need_alloc_buf_num;
+	u32 endian;
 
 	vf_buf_num_used = vf_buf_num;
 	if (buf_size <= 0x00400000) {
@@ -899,37 +909,40 @@ static int vavs_canvas_init(void)
 			continue;
 		}
 #endif
-
+		if (vdec->canvas_mode == CANVAS_BLKMODE_LINEAR)
+			endian = 7;
+		else
+			endian = 0;
 #ifdef NV21
-			canvas_config(canvas_base + canvas_num * i + 0,
+			canvas_config_ex(canvas_base + canvas_num * i + 0,
 					buf_start,
 					canvas_width, canvas_height,
 					CANVAS_ADDR_NOWRAP,
-					CANVAS_BLKMODE_32X32);
-			canvas_config(canvas_base + canvas_num * i + 1,
+					vdec->canvas_mode, endian);
+			canvas_config_ex(canvas_base + canvas_num * i + 1,
 					buf_start +
 					decbuf_y_size, canvas_width,
 					canvas_height / 2,
 					CANVAS_ADDR_NOWRAP,
-					CANVAS_BLKMODE_32X32);
+					vdec->canvas_mode, endian);
 #else
-			canvas_config(canvas_num * i + 0,
+			canvas_config_ex(canvas_num * i + 0,
 					buf_start,
 					canvas_width, canvas_height,
 					CANVAS_ADDR_NOWRAP,
-					CANVAS_BLKMODE_32X32);
-			canvas_config(canvas_num * i + 1,
+					vdec->canvas_mode, endian);
+			canvas_config_ex(canvas_num * i + 1,
 					buf_start +
 					decbuf_y_size, canvas_width / 2,
 					canvas_height / 2,
 					CANVAS_ADDR_NOWRAP,
-					CANVAS_BLKMODE_32X32);
-			canvas_config(canvas_num * i + 2,
+					vdec->canvas_mode, endian);
+			canvas_config_ex(canvas_num * i + 2,
 					buf_start +
 					decbuf_y_size + decbuf_uv_size,
 					canvas_width / 2, canvas_height / 2,
 					CANVAS_ADDR_NOWRAP,
-					CANVAS_BLKMODE_32X32);
+					vdec->canvas_mode, endian);
 #endif
 			if (debug_flag & AVS_DEBUG_PRINT) {
 				pr_info("canvas config %d, addr %p\n", i,
@@ -1294,8 +1307,6 @@ static void vavs_notify_work(struct work_struct *work)
 
 static void avs_set_clk(struct work_struct *work)
 {
-	if (frame_dur > 0 && saved_resolution !=
-		frame_width * frame_height * (96000 / frame_dur)) {
 		int fps = 96000 / frame_dur;
 
 		saved_resolution = frame_width * frame_height * fps;
@@ -1307,8 +1318,6 @@ static void avs_set_clk(struct work_struct *work)
 			vdec_source_changed(VFORMAT_AVS,
 			frame_width, frame_height, fps);
 		}
-
-	}
 }
 
 static void vavs_put_timer_func(unsigned long arg)
@@ -1401,7 +1410,9 @@ static void vavs_put_timer_func(unsigned long arg)
 
 	}
 
-	schedule_work(&set_clk_work);
+	if (frame_dur > 0 && saved_resolution !=
+		frame_width * frame_height * (96000 / frame_dur))
+		schedule_work(&set_clk_work);
 
 	timer->expires = jiffies + PUT_INTERVAL;
 
@@ -1605,12 +1616,13 @@ static s32 vavs_init(void)
 #endif
 
 	if (vavs_amstream_dec_info.rate != 0) {
-		if (!is_reset)
+		if (!is_reset) {
 			vf_notify_receiver(PROVIDER_NAME,
 					VFRAME_EVENT_PROVIDER_FR_HINT,
 					(void *)((unsigned long)
 					vavs_amstream_dec_info.rate));
-		fr_hint_status = VDEC_HINTED;
+			fr_hint_status = VDEC_HINTED;
+		}
 	} else
 		fr_hint_status = VDEC_NEED_HINT;
 
@@ -1690,6 +1702,7 @@ static int amvdec_avs_probe(struct platform_device *pdev)
 	}
 
 	INIT_WORK(&set_clk_work, avs_set_clk);
+	vdec = pdata;
 	if (vavs_init() < 0) {
 		pr_info("amvdec_avs init failed.\n");
 		kfree(gvs);
@@ -1697,7 +1710,6 @@ static int amvdec_avs_probe(struct platform_device *pdev)
 		pdata->dec_status = NULL;
 		return -ENODEV;
 	}
-	vdec = pdata;
 
 	INIT_WORK(&fatal_error_wd_work, vavs_fatal_error_handler);
 	atomic_set(&error_handler_run, 0);
@@ -1717,7 +1729,6 @@ static int amvdec_avs_remove(struct platform_device *pdev)
 	cancel_work_sync(&userdata_push_work);
 
 	cancel_work_sync(&notify_work);
-	cancel_work_sync(&set_clk_work);
 	if (stat & STAT_VDEC_RUN) {
 		amvdec_stop();
 		stat &= ~STAT_VDEC_RUN;
@@ -1769,7 +1780,7 @@ static int amvdec_avs_remove(struct platform_device *pdev)
 	}
 #endif
 	if (stat & STAT_VF_HOOK) {
-		if (fr_hint_status == VDEC_HINTED && !is_reset)
+		if (fr_hint_status == VDEC_HINTED)
 			vf_notify_receiver(PROVIDER_NAME,
 				VFRAME_EVENT_PROVIDER_FR_END_HINT, NULL);
 		fr_hint_status = VDEC_NO_NEED_HINT;
@@ -1806,6 +1817,7 @@ static int amvdec_avs_remove(struct platform_device *pdev)
 	kfree(gvs);
 	gvs = NULL;
 
+	cancel_work_sync(&set_clk_work);
 	return 0;
 }
 

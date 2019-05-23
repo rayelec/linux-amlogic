@@ -22,6 +22,7 @@
 #include <linux/timer.h>
 #include <linux/kfifo.h>
 #include <linux/platform_device.h>
+#include <linux/random.h>
 
 #include <linux/amlogic/media/utils/amstream.h>
 #include <linux/amlogic/media/frame_sync/ptsserv.h>
@@ -60,6 +61,9 @@
 #include "../../../amvdec_ports/vdec_drv_base.h"
 #include "../../../common/chips/decoder_cpu_ver_info.h"
 #include <linux/crc32.h>
+
+#include <trace/events/meson_atrace.h>
+
 
 #undef pr_info
 #define pr_info printk
@@ -276,7 +280,7 @@ static unsigned int force_sliding_margin;
 		bit[15:8]: the max count of skip frames after first I
 	3, start playing from IDR
 */
-static unsigned int first_i_policy = (15 << 8) | 2;
+static unsigned int first_i_policy = 1;
 
 /*
 	fast_output_enable:
@@ -826,6 +830,8 @@ struct vdec_h264_hw_s {
 	int need_cache_size;
 	u64 sc_start_time;
 	u8 frmbase_cont_flag;
+	struct vframe_qos_s vframe_qos;
+	int frameinfo_enable;
 };
 
 static u32 again_threshold = 0x40;
@@ -2374,6 +2380,63 @@ static int check_force_interlace(struct vdec_h264_hw_s *hw,
 	return bForceInterlace;
 }
 
+static void fill_frame_info(struct vdec_h264_hw_s *hw, struct FrameStore *frame)
+{
+	struct vframe_qos_s *vframe_qos = &hw->vframe_qos;
+	if (frame->slice_type == I_SLICE)
+		vframe_qos->type = 1;
+	else if (frame->slice_type == P_SLICE)
+		vframe_qos->type = 2;
+	else if (frame->slice_type == B_SLICE)
+		vframe_qos->type = 3;
+
+	vframe_qos->size = frame->frame_size;
+	vframe_qos->pts = frame->pts64;
+
+	vframe_qos->max_mv = frame->max_mv;
+	vframe_qos->avg_mv = frame->avg_mv;
+	vframe_qos->min_mv = frame->min_mv;
+/*
+	pr_info("mv: max:%d,  avg:%d, min:%d\n",
+		vframe_qos->max_mv,
+		vframe_qos->avg_mv,
+		vframe_qos->min_mv);
+*/
+
+	vframe_qos->max_qp = frame->max_qp;
+	vframe_qos->avg_qp = frame->avg_qp;
+	vframe_qos->min_qp = frame->min_qp;
+/*
+	pr_info("qp: max:%d,  avg:%d, min:%d\n",
+		vframe_qos->max_qp,
+		vframe_qos->avg_qp,
+		vframe_qos->min_qp);
+*/
+
+	vframe_qos->max_skip = frame->max_skip;
+	vframe_qos->avg_skip = frame->avg_skip;
+	vframe_qos->min_skip = frame->min_skip;
+/*
+	pr_info("skip: max:%d,  avg:%d, min:%d\n",
+		vframe_qos->max_skip,
+		vframe_qos->avg_skip,
+		vframe_qos->min_skip);
+*/
+	vframe_qos->num++;
+	if (hw->frameinfo_enable)
+		vdec_fill_frame_info(vframe_qos, 1);
+}
+
+static int is_iframe(struct FrameStore *frame) {
+
+	if (frame->frame && frame->frame->slice_type == I_SLICE) {
+		return 1;
+	}
+	return 0;
+}
+
+
+
 int prepare_display_buf(struct vdec_s *vdec, struct FrameStore *frame)
 {
 	struct vdec_h264_hw_s *hw = (struct vdec_h264_hw_s *)vdec->private;
@@ -2412,10 +2475,17 @@ int prepare_display_buf(struct vdec_s *vdec, struct FrameStore *frame)
 			__func__, buffer_index,  frame->data_flag & ERROR_FLAG,
 			frame->poc, hw->data_flag & ERROR_FLAG,
 			error_proc_policy);
+	if (frame->frame == NULL &&
+			((frame->is_used == 1 && frame->top_field)
+			|| (frame->is_used == 2 && frame->bottom_field))) {
+			dpb_print(DECODE_ID(hw), PRINT_FLAG_ERRORFLAG_DBG,
+				"%s Error  frame_num %d  used %d\n",
+					frame->frame_num, frame->is_used);
+			frame->data_flag |= ERROR_FLAG;
+	}
 
 	if ((frame->data_flag & NODISP_FLAG) ||
 		(frame->data_flag & NULL_FLAG) ||
-		(frame->data_flag & ERROR_FLAG) ||
 		((!hw->send_error_frame_flag) &&
 			(frame->data_flag & ERROR_FLAG)) ||
 		((hw->i_only & 0x1) &&
@@ -2450,6 +2520,7 @@ int prepare_display_buf(struct vdec_s *vdec, struct FrameStore *frame)
 	if (bForceInterlace)
 		vf_count = 2;
 	hw->buffer_spec[buffer_index].vf_ref = 0;
+	fill_frame_info(hw, frame);
 	for (i = 0; i < vf_count; i++) {
 		if (kfifo_get(&hw->newframe_q, &vf) == 0 ||
 			vf == NULL) {
@@ -2459,7 +2530,7 @@ int prepare_display_buf(struct vdec_s *vdec, struct FrameStore *frame)
 			return -1;
 		}
 		vf->duration_pulldown = 0;
-		if (!(frame->frame->slice_type == I_SLICE) && hw->unstable_pts) {
+		if (!(is_iframe(frame)) && hw->unstable_pts) {
 			vf->pts = 0;
 			vf->pts_us64 = 0;
 			vf->timestamp = 0;
@@ -2592,8 +2663,13 @@ int prepare_display_buf(struct vdec_s *vdec, struct FrameStore *frame)
 			else
 				decoder_do_frame_check(hw_to_vdec(hw), vf);
 		}
-		kfifo_put(&hw->display_q, (const struct vframe_s *)vf);
 
+		vf->ratio_control |= (0x3FF << DISP_RATIO_ASPECT_RATIO_BIT);
+		vf->sar_width = vf->width;
+		vf->sar_height = vf->height;
+
+		kfifo_put(&hw->display_q, (const struct vframe_s *)vf);
+		ATRACE_COUNTER(MODULE_NAME, vf->pts);
 		hw->vf_pre_count++;
 		vdec->vdec_fps_detec(vdec->id);
 		vf_notify_receiver(vdec->vf_provider_name,
@@ -2631,6 +2707,8 @@ int notify_v4l_eos(struct vdec_s *vdec)
 		vf->flag = VFRAME_FLAG_EMPTY_FRAME_V4L;
 
 		kfifo_put(&hw->display_q, (const struct vframe_s *)vf);
+
+		ATRACE_COUNTER(MODULE_NAME, vf->pts);
 		vf_notify_receiver(vdec->vf_provider_name,
 			VFRAME_EVENT_PROVIDER_VFRAME_READY, NULL);
 
@@ -3778,6 +3856,402 @@ static void set_frame_info(struct vdec_h264_hw_s *hw, struct vframe_s *vf,
 
 }
 
+static void get_picture_qos_info(struct StorablePicture *picture)
+{
+	if (get_cpu_major_id() < AM_MESON_CPU_MAJOR_ID_G12A) {
+		unsigned char a[3];
+		unsigned char i, j, t;
+		unsigned long  data;
+
+		get_random_bytes(&data, sizeof(unsigned long));
+		if (picture->slice_type == I_SLICE)
+			data = 0;
+		a[0] = data & 0xff;
+		a[1] = (data >> 8) & 0xff;
+		a[2] = (data >> 16) & 0xff;
+
+		for (i = 0; i < 3; i++)
+			for (j = i+1; j < 3; j++) {
+				if (a[j] < a[i]) {
+					t = a[j];
+					a[j] = a[i];
+					a[i] = t;
+				} else if (a[j] == a[i]) {
+					a[i]++;
+					t = a[j];
+					a[j] = a[i];
+					a[i] = t;
+				}
+			}
+		picture->max_mv = a[2];
+		picture->avg_mv = a[1];
+		picture->min_mv = a[0];
+		/*
+		pr_info("mv data %x  a[0]= %x a[1]= %x a[2]= %x\n",
+			data, a[0], a[1], a[2]);
+		*/
+
+		get_random_bytes(&data, sizeof(unsigned long));
+		a[0] = data & 0x1f;
+		a[1] = (data >> 8) & 0x3f;
+		a[2] = (data >> 16) & 0x7f;
+
+		for (i = 0; i < 3; i++)
+			for (j = i+1; j < 3; j++) {
+				if (a[j] < a[i]) {
+					t = a[j];
+					a[j] = a[i];
+					a[i] = t;
+				} else if (a[j] == a[i]) {
+					a[i]++;
+					t = a[j];
+					a[j] = a[i];
+					a[i] = t;
+				}
+			}
+		picture->max_qp = a[2];
+		picture->avg_qp = a[1];
+		picture->min_qp = a[0];
+		/*
+		pr_info("qp data %x  a[0]= %x a[1]= %x a[2]= %x\n",
+			data, a[0], a[1], a[2]);
+		*/
+
+		get_random_bytes(&data, sizeof(unsigned long));
+		a[0] = data & 0x1f;
+		a[1] = (data >> 8) & 0x3f;
+		a[2] = (data >> 16) & 0x7f;
+
+		for (i = 0; i < 3; i++)
+			for (j = i+1; j < 3; j++) {
+				if (a[j] < a[i]) {
+					t = a[j];
+					a[j] = a[i];
+					a[i] = t;
+				} else if (a[j] == a[i]) {
+					a[i]++;
+					t = a[j];
+					a[j] = a[i];
+					a[i] = t;
+				}
+			}
+		picture->max_skip = a[2];
+		picture->avg_skip = a[1];
+		picture->min_skip = a[0];
+
+
+		/*
+		pr_info("skip data %x  a[0]= %x a[1]= %x a[2]= %x\n",
+			data,a[0], a[1], a[2]);
+		*/
+	} else {
+		uint32_t blk88_y_count;
+		uint32_t blk88_c_count;
+		uint32_t blk22_mv_count;
+		uint32_t rdata32;
+		int32_t mv_hi;
+		int32_t mv_lo;
+		uint32_t rdata32_l;
+		uint32_t mvx_L0_hi;
+		uint32_t mvy_L0_hi;
+		uint32_t mvx_L1_hi;
+		uint32_t mvy_L1_hi;
+		int64_t value;
+		uint64_t temp_value;
+/*
+#define DEBUG_QOS
+*/
+#ifdef DEBUG_QOS
+		int pic_number = picture->poc;
+#endif
+
+		picture->max_mv = 0;
+		picture->avg_mv = 0;
+		picture->min_mv = 0;
+
+		picture->max_skip = 0;
+		picture->avg_skip = 0;
+		picture->min_skip = 0;
+
+		picture->max_qp = 0;
+		picture->avg_qp = 0;
+		picture->min_qp = 0;
+
+
+
+
+
+		/* set rd_idx to 0 */
+	    WRITE_VREG(VDEC_PIC_QUALITY_CTRL, 0);
+	    blk88_y_count = READ_VREG(VDEC_PIC_QUALITY_DATA);
+	    if (blk88_y_count == 0) {
+#ifdef DEBUG_QOS
+			pr_info(" [Picture %d Quality] NO Data yet.\n",
+				pic_number);
+#endif
+			/* reset all counts */
+			WRITE_VREG(VDEC_PIC_QUALITY_CTRL, (1<<8));
+			return;
+	    }
+		/* qp_y_sum */
+	    rdata32 = READ_VREG(VDEC_PIC_QUALITY_DATA);
+#ifdef DEBUG_QOS
+	    pr_info(" [Picture %d Quality] Y QP AVG : %d (%d/%d)\n",
+			pic_number, rdata32/blk88_y_count,
+			rdata32, blk88_y_count);
+#endif
+		picture->avg_qp = rdata32/blk88_y_count;
+		/* intra_y_count */
+	    rdata32 = READ_VREG(VDEC_PIC_QUALITY_DATA);
+#ifdef DEBUG_QOS
+	    pr_info(" [Picture %d Quality] Y intra rate : %d%c (%d)\n",
+			pic_number, rdata32*100/blk88_y_count,
+			'%', rdata32);
+#endif
+		/* skipped_y_count */
+	    rdata32 = READ_VREG(VDEC_PIC_QUALITY_DATA);
+#ifdef DEBUG_QOS
+	    pr_info(" [Picture %d Quality] Y skipped rate : %d%c (%d)\n",
+			pic_number, rdata32*100/blk88_y_count,
+			'%', rdata32);
+#endif
+		picture->avg_skip = rdata32*100/blk88_y_count;
+		/* coeff_non_zero_y_count */
+	    rdata32 = READ_VREG(VDEC_PIC_QUALITY_DATA);
+#ifdef DEBUG_QOS
+	    pr_info(" [Picture %d Quality] Y ZERO_Coeff rate : %d%c (%d)\n",
+			pic_number, (100 - rdata32*100/(blk88_y_count*1)),
+			'%', rdata32);
+#endif
+		/* blk66_c_count */
+	    blk88_c_count = READ_VREG(VDEC_PIC_QUALITY_DATA);
+	    if (blk88_c_count == 0) {
+#ifdef DEBUG_QOS
+			pr_info(" [Picture %d Quality] NO Data yet.\n",
+				pic_number);
+#endif
+			/* reset all counts */
+			WRITE_VREG(VDEC_PIC_QUALITY_CTRL, (1<<8));
+			return;
+	    }
+		/* qp_c_sum */
+	    rdata32 = READ_VREG(VDEC_PIC_QUALITY_DATA);
+#ifdef DEBUG_QOS
+	    pr_info(" [Picture %d Quality] C QP AVG : %d (%d/%d)\n",
+			pic_number, rdata32/blk88_c_count,
+			rdata32, blk88_c_count);
+#endif
+		/* intra_c_count */
+	    rdata32 = READ_VREG(VDEC_PIC_QUALITY_DATA);
+#ifdef DEBUG_QOS
+	    pr_info(" [Picture %d Quality] C intra rate : %d%c (%d)\n",
+			pic_number, rdata32*100/blk88_c_count,
+			'%', rdata32);
+#endif
+		/* skipped_cu_c_count */
+	    rdata32 = READ_VREG(VDEC_PIC_QUALITY_DATA);
+#ifdef DEBUG_QOS
+	    pr_info(" [Picture %d Quality] C skipped rate : %d%c (%d)\n",
+			pic_number, rdata32*100/blk88_c_count,
+			'%', rdata32);
+#endif
+		/* coeff_non_zero_c_count */
+	    rdata32 = READ_VREG(VDEC_PIC_QUALITY_DATA);
+#ifdef DEBUG_QOS
+	    pr_info(" [Picture %d Quality] C ZERO_Coeff rate : %d%c (%d)\n",
+			pic_number, (100 - rdata32*100/(blk88_c_count*1)),
+			'%', rdata32);
+#endif
+
+		/* 1'h0, qp_c_max[6:0], 1'h0, qp_c_min[6:0],
+		1'h0, qp_y_max[6:0], 1'h0, qp_y_min[6:0] */
+	    rdata32 = READ_VREG(VDEC_PIC_QUALITY_DATA);
+#ifdef DEBUG_QOS
+	    pr_info(" [Picture %d Quality] Y QP min : %d\n",
+			pic_number, (rdata32>>0)&0xff);
+#endif
+		picture->min_qp = (rdata32>>0)&0xff;
+
+#ifdef DEBUG_QOS
+	    pr_info(" [Picture %d Quality] Y QP max : %d\n",
+			pic_number, (rdata32>>8)&0xff);
+#endif
+		picture->max_qp = (rdata32>>8)&0xff;
+
+#ifdef DEBUG_QOS
+	    pr_info(" [Picture %d Quality] C QP min : %d\n",
+			pic_number, (rdata32>>16)&0xff);
+	    pr_info(" [Picture %d Quality] C QP max : %d\n",
+			pic_number, (rdata32>>24)&0xff);
+#endif
+
+		/* blk22_mv_count */
+	    blk22_mv_count = READ_VREG(VDEC_PIC_QUALITY_DATA);
+	    if (blk22_mv_count == 0) {
+#ifdef DEBUG_QOS
+			pr_info(" [Picture %d Quality] NO MV Data yet.\n",
+				pic_number);
+#endif
+			/* reset all counts */
+			WRITE_VREG(VDEC_PIC_QUALITY_CTRL, (1<<8));
+			return;
+	    }
+		/* mvy_L1_count[39:32], mvx_L1_count[39:32],
+		mvy_L0_count[39:32], mvx_L0_count[39:32] */
+	    rdata32 = READ_VREG(VDEC_PIC_QUALITY_DATA);
+	    /* should all be 0x00 or 0xff */
+#ifdef DEBUG_QOS
+	    pr_info(" [Picture %d Quality] MV AVG High Bits: 0x%X\n",
+			pic_number, rdata32);
+#endif
+	    mvx_L0_hi = ((rdata32>>0)&0xff);
+	    mvy_L0_hi = ((rdata32>>8)&0xff);
+	    mvx_L1_hi = ((rdata32>>16)&0xff);
+	    mvy_L1_hi = ((rdata32>>24)&0xff);
+
+		/* mvx_L0_count[31:0] */
+	    rdata32_l = READ_VREG(VDEC_PIC_QUALITY_DATA);
+		temp_value = mvx_L0_hi;
+		temp_value = (temp_value << 32) | rdata32_l;
+
+		if (mvx_L0_hi & 0x80)
+			value = 0xFFFFFFF000000000 | temp_value;
+		else
+			value = temp_value;
+		value = div_s64(value, blk22_mv_count);
+#ifdef DEBUG_QOS
+		pr_info(" [Picture %d Quality] MVX_L0 AVG : %d (%lld/%d)\n",
+			pic_number, (int)(value),
+			value, blk22_mv_count);
+#endif
+		picture->avg_mv = value;
+
+		/* mvy_L0_count[31:0] */
+	    rdata32_l = READ_VREG(VDEC_PIC_QUALITY_DATA);
+		temp_value = mvy_L0_hi;
+		temp_value = (temp_value << 32) | rdata32_l;
+
+		if (mvy_L0_hi & 0x80)
+			value = 0xFFFFFFF000000000 | temp_value;
+		else
+			value = temp_value;
+#ifdef DEBUG_QOS
+	    pr_info(" [Picture %d Quality] MVY_L0 AVG : %d (%lld/%d)\n",
+			pic_number, rdata32_l/blk22_mv_count,
+			value, blk22_mv_count);
+#endif
+
+		/* mvx_L1_count[31:0] */
+	    rdata32_l = READ_VREG(VDEC_PIC_QUALITY_DATA);
+		temp_value = mvx_L1_hi;
+		temp_value = (temp_value << 32) | rdata32_l;
+		if (mvx_L1_hi & 0x80)
+			value = 0xFFFFFFF000000000 | temp_value;
+		else
+			value = temp_value;
+#ifdef DEBUG_QOS
+	    pr_info(" [Picture %d Quality] MVX_L1 AVG : %d (%lld/%d)\n",
+			pic_number, rdata32_l/blk22_mv_count,
+			value, blk22_mv_count);
+#endif
+
+		/* mvy_L1_count[31:0] */
+	    rdata32_l = READ_VREG(VDEC_PIC_QUALITY_DATA);
+		temp_value = mvy_L1_hi;
+		temp_value = (temp_value << 32) | rdata32_l;
+		if (mvy_L1_hi & 0x80)
+			value = 0xFFFFFFF000000000 | temp_value;
+		else
+			value = temp_value;
+#ifdef DEBUG_QOS
+	    pr_info(" [Picture %d Quality] MVY_L1 AVG : %d (%lld/%d)\n",
+			pic_number, rdata32_l/blk22_mv_count,
+			value, blk22_mv_count);
+#endif
+
+		/* {mvx_L0_max, mvx_L0_min} // format : {sign, abs[14:0]}  */
+	    rdata32 = READ_VREG(VDEC_PIC_QUALITY_DATA);
+	    mv_hi = (rdata32>>16)&0xffff;
+	    if (mv_hi & 0x8000)
+			mv_hi = 0x8000 - mv_hi;
+#ifdef DEBUG_QOS
+	    pr_info(" [Picture %d Quality] MVX_L0 MAX : %d\n",
+			pic_number, mv_hi);
+#endif
+		picture->max_mv = mv_hi;
+
+	    mv_lo = (rdata32>>0)&0xffff;
+	    if (mv_lo & 0x8000)
+			mv_lo = 0x8000 - mv_lo;
+#ifdef DEBUG_QOS
+	    pr_info(" [Picture %d Quality] MVX_L0 MIN : %d\n",
+			pic_number, mv_lo);
+#endif
+		picture->min_mv = mv_lo;
+
+		/* {mvy_L0_max, mvy_L0_min} */
+	    rdata32 = READ_VREG(VDEC_PIC_QUALITY_DATA);
+	    mv_hi = (rdata32>>16)&0xffff;
+	    if (mv_hi & 0x8000)
+			mv_hi = 0x8000 - mv_hi;
+#ifdef DEBUG_QOS
+	    pr_info(" [Picture %d Quality] MVY_L0 MAX : %d\n",
+			pic_number, mv_hi);
+#endif
+
+	    mv_lo = (rdata32>>0)&0xffff;
+	    if (mv_lo & 0x8000)
+			mv_lo = 0x8000 - mv_lo;
+#ifdef DEBUG_QOS
+	    pr_info(" [Picture %d Quality] MVY_L0 MIN : %d\n",
+			pic_number, mv_lo);
+#endif
+
+		/* {mvx_L1_max, mvx_L1_min} */
+	    rdata32 = READ_VREG(VDEC_PIC_QUALITY_DATA);
+	    mv_hi = (rdata32>>16)&0xffff;
+	    if (mv_hi & 0x8000)
+			mv_hi = 0x8000 - mv_hi;
+#ifdef DEBUG_QOS
+	    pr_info(" [Picture %d Quality] MVX_L1 MAX : %d\n",
+			pic_number, mv_hi);
+#endif
+
+	    mv_lo = (rdata32>>0)&0xffff;
+	    if (mv_lo & 0x8000)
+			mv_lo = 0x8000 - mv_lo;
+#ifdef DEBUG_QOS
+	    pr_info(" [Picture %d Quality] MVX_L1 MIN : %d\n",
+			pic_number, mv_lo);
+#endif
+
+		/* {mvy_L1_max, mvy_L1_min} */
+	    rdata32 = READ_VREG(VDEC_PIC_QUALITY_DATA);
+	    mv_hi = (rdata32>>16)&0xffff;
+	    if (mv_hi & 0x8000)
+			mv_hi = 0x8000 - mv_hi;
+#ifdef DEBUG_QOS
+	    pr_info(" [Picture %d Quality] MVY_L1 MAX : %d\n",
+			pic_number, mv_hi);
+#endif
+	    mv_lo = (rdata32>>0)&0xffff;
+	    if (mv_lo & 0x8000)
+			mv_lo = 0x8000 - mv_lo;
+#ifdef DEBUG_QOS
+	    pr_info(" [Picture %d Quality] MVY_L1 MIN : %d\n",
+			pic_number, mv_lo);
+#endif
+
+	    rdata32 = READ_VREG(VDEC_PIC_QUALITY_CTRL);
+#ifdef DEBUG_QOS
+	    pr_info(" [Picture %d Quality] After Read : VDEC_PIC_QUALITY_CTRL : 0x%x\n",
+			pic_number, rdata32);
+#endif
+		/* reset all counts */
+	    WRITE_VREG(VDEC_PIC_QUALITY_CTRL, (1<<8));
+	}
+}
+
 static int get_max_dec_frame_buf_size(int level_idc,
 		int max_reference_frame_num, int mb_width,
 		int mb_height)
@@ -4818,6 +5292,7 @@ static irqreturn_t vh264_isr_thread_fn(struct vdec_s *vdec, int irq)
 		u32 video_signal;
 
 		int slice_header_process_status = 0;
+		int I_flag;
 		/*unsigned char is_idr;*/
 		unsigned short *p = (unsigned short *)hw->lmem_addr;
 		reset_process_time(hw);
@@ -4976,6 +5451,13 @@ static irqreturn_t vh264_isr_thread_fn(struct vdec_s *vdec, int irq)
 			val(p_H264_Dpb->dpb_param.dpb.frame_pic_order_cnt),
 			val(p_H264_Dpb->dpb_param.dpb.top_field_pic_order_cnt),
 			val(p_H264_Dpb->dpb_param.dpb.top_field_pic_order_cnt));
+		I_flag = (p_H264_Dpb->dpb_param.l.data[SLICE_TYPE] == I_Slice)
+			? I_FLAG : 0;
+		if ((hw->i_only & 0x2) && (!(I_flag & I_FLAG)) &&
+			(p_H264_Dpb->mSlice.structure == FRAME)) {
+				hw->data_flag = NULL_FLAG;
+				goto pic_done_proc;
+		}
 
 		slice_header_process_status =
 			h264_slice_header_process(p_H264_Dpb);
@@ -4997,18 +5479,7 @@ static irqreturn_t vh264_isr_thread_fn(struct vdec_s *vdec, int irq)
 				else
 					p_H264_Dpb->fast_output_enable
 							= fast_output_enable;
-				hw->data_flag =
-					(p_H264_Dpb->
-						dpb_param.l.data[SLICE_TYPE]
-						== I_Slice)
-					? I_FLAG : 0;
-				if ((hw->i_only & 0x2) &&
-					(!(hw->data_flag & I_FLAG)) &&
-					(p_H264_Dpb->mSlice.structure
-					== FRAME)) {
-					hw->data_flag =	NULL_FLAG;
-					goto pic_done_proc;
-				}
+				hw->data_flag = I_flag;
 				if ((p_H264_Dpb->
 					dpb_param.dpb.NAL_info_mmco & 0x1f)
 					== 5)
@@ -5129,6 +5600,7 @@ pic_done_proc:
 			hw->frmbase_cont_flag = 0;
 
 		if (p_H264_Dpb->mVideo.dec_picture) {
+			get_picture_qos_info(p_H264_Dpb->mVideo.dec_picture);
 #ifdef CONFIG_AMLOGIC_MEDIA_ENHANCEMENT_DOLBYVISION
 			DEL_EXIST(hw,
 				p_H264_Dpb->mVideo.dec_picture) = 0;
@@ -5171,7 +5643,8 @@ pic_done_proc:
 				u32 offset = pic->offset_delimiter_lo |
 					(pic->offset_delimiter_hi << 16);
 				if (pts_lookup_offset_us64(PTS_TYPE_VIDEO,
-					offset, &pic->pts, 0, &pic->pts64)) {
+					offset, &pic->pts, &pic->frame_size,
+					0, &pic->pts64)) {
 					pic->pts = 0;
 					pic->pts64 = 0;
 #ifdef MH264_USERDATA_ENABLE
@@ -5642,12 +6115,14 @@ static void vmh264_dump_state(struct vdec_s *vdec)
 	dpb_print(DECODE_ID(hw), 0,
 		"====== %s\n", __func__);
 	dpb_print(DECODE_ID(hw), 0,
-		"width/height (%d/%d), reorder_pic_num %d dpb size(bufspec count) %d max_reference_size(collocate count) %d\n",
+		"width/height (%d/%d), reorder_pic_num %d dpb size(bufspec count) %d max_reference_size(collocate count) %d i_only %d  send_err %d\n",
 		hw->frame_width,
 		hw->frame_height,
 		hw->dpb.reorder_pic_num,
 		hw->dpb.mDPB.size,
-		hw->max_reference_size
+		hw->max_reference_size,
+		hw->i_only,
+		hw->send_error_frame_flag
 		);
 
 	dpb_print(DECODE_ID(hw), 0,
@@ -5676,7 +6151,7 @@ static void vmh264_dump_state(struct vdec_s *vdec)
 	}
 
 	dpb_print(DECODE_ID(hw), 0,
-	"%s, newq(%d/%d), dispq(%d/%d) vf prepare/get/put (%d/%d/%d), free_spec(%d), initdon(%d), used_size(%d/%d), unused_fr_dpb(%d)\n",
+	"%s, newq(%d/%d), dispq(%d/%d) vf prepare/get/put (%d/%d/%d), free_spec(%d), initdon(%d), used_size(%d/%d), unused_fr_dpb(%d)  fast_output_enable %x\n",
 	__func__,
 	kfifo_len(&hw->newframe_q),
 	VF_POOL_SIZE,
@@ -5688,7 +6163,8 @@ static void vmh264_dump_state(struct vdec_s *vdec)
 	have_free_buf_spec(vdec),
 	p_H264_Dpb->mDPB.init_done,
 	p_H264_Dpb->mDPB.used_size, p_H264_Dpb->mDPB.size,
-	is_there_unused_frame_from_dpb(&p_H264_Dpb->mDPB)
+	is_there_unused_frame_from_dpb(&p_H264_Dpb->mDPB),
+	p_H264_Dpb->fast_output_enable
 	);
 
 	dump_dpb(&p_H264_Dpb->mDPB, 1);
@@ -5858,6 +6334,7 @@ static void check_timer_func(unsigned long arg)
 
 static int dec_status(struct vdec_s *vdec, struct vdec_info *vstatus)
 {
+	u32 ar;
 	struct vdec_h264_hw_s *hw = (struct vdec_h264_hw_s *)vdec->private;
 
 	if (!hw)
@@ -5871,6 +6348,12 @@ static int dec_status(struct vdec_s *vdec, struct vdec_info *vstatus)
 		vstatus->frame_rate = -1;
 	vstatus->error_count = 0;
 	vstatus->status = hw->stat;
+	ar = min_t(u32,
+			hw->h264_ar,
+			DISP_RATIO_ASPECT_RATIO_MAX);
+	vstatus->ratio_control =
+		ar << DISP_RATIO_ASPECT_RATIO_BIT;
+
 	snprintf(vstatus->vdec_name, sizeof(vstatus->vdec_name),
 		"%s-%02d", DRIVER_NAME, hw->id);
 
@@ -6113,6 +6596,8 @@ static void vh264_local_init(struct vdec_h264_hw_s *hw)
 
 	if (i_only_flag & 0x100)
 		hw->i_only = i_only_flag & 0xff;
+	if (hw->i_only)
+		hw->dpb.first_insert_frame = FirstInsertFrm_SKIPDONE;
 
 	if ((unsigned long) hw->vh264_amstream_dec_info.param
 		& 0x08)
@@ -6439,6 +6924,25 @@ static int vh264_stop(struct vdec_h264_hw_s *hw)
 		"%s\n",
 		__func__);
 	return 0;
+}
+
+static void wait_vmh264_search_done(struct vdec_h264_hw_s *hw)
+{
+	u32 vld_rp = READ_VREG(VLD_MEM_VIFIFO_RP);
+	int count = 0;
+	do {
+		usleep_range(100, 500);
+		if (vld_rp == READ_VREG(VLD_MEM_VIFIFO_RP))
+			break;
+		if (count > 2000) {
+			dpb_print(DECODE_ID(hw),
+			PRINT_FLAG_ERROR, "%s timeout count %d vld_rp 0x%x VLD_MEM_VIFIFO_RP 0x%x\n",
+			 __func__, count, vld_rp, READ_VREG(VLD_MEM_VIFIFO_RP));
+			break;
+		} else
+			vld_rp = READ_VREG(VLD_MEM_VIFIFO_RP);
+		count++;
+	} while (1);
 }
 
 static void vh264_notify_work(struct work_struct *work)
@@ -6885,7 +7389,7 @@ static int vmh264_user_data_read(struct vdec_s *vdec,
 
 	hw = (struct vdec_h264_hw_s *)vdec->private;
 
-	pdest_buf = (u8 *)puserdata_para->pbuf_addr;
+	pdest_buf = puserdata_para->pbuf_addr;
 
 	mutex_lock(&hw->userdata_mutex);
 
@@ -7244,7 +7748,6 @@ result_done:
 			}
 		decode_frame_count[DECODE_ID(hw)]++;
 		amvdec_stop();
-
 		if (!vdec_is_support_4k()) {
 			if (clk_adj_frame_count < VDEC_CLOCK_ADJUST_FRAME) {
 				clk_adj_frame_count++;
@@ -7308,6 +7811,7 @@ result_done:
 	del_timer_sync(&hw->check_timer);
 	hw->stat &= ~STAT_TIMER_ARM;
 
+	wait_vmh264_search_done(hw);
 	/* mark itself has all HW resource released and input released */
 
 #ifdef CONFIG_AMLOGIC_MEDIA_ENHANCEMENT_DOLBYVISION
@@ -7975,6 +8479,14 @@ static int ammvdec_h264_probe(struct platform_device *pdev)
 			(pdata->sys_info->height * pdata->sys_info->width
 			> 1920 * 1088))
 			hw->mmu_enable = 1;
+
+	if (hw->mmu_enable &&
+		(pdata->frame_base_video_path == FRAME_BASE_PATH_IONVIDEO)) {
+		hw->mmu_enable = 0;
+		pr_info("ionvideo needs disable mmu, path= %d \n",
+				pdata->frame_base_video_path);
+	}
+
 	if (ammvdec_h264_mmu_init(hw)) {
 		h264_free_hw_stru(&pdev->dev, (void *)hw);
 		pr_info("\nammvdec_h264 mmu alloc failed!\n");
@@ -8033,9 +8545,11 @@ static int ammvdec_h264_probe(struct platform_device *pdev)
 	pdata->user_data_read = NULL;
 	pdata->reset_userdata_fifo = NULL;
 #endif
-	if (pdata->use_vfm_path)
+	if (pdata->use_vfm_path) {
 		snprintf(pdata->vf_provider_name, VDEC_PROVIDER_NAME_SIZE,
 			VFM_DEC_PROVIDER_NAME);
+		hw->frameinfo_enable = 1;
+	}
 #ifdef CONFIG_AMLOGIC_MEDIA_ENHANCEMENT_DOLBYVISION
 	else if (vdec_dual(pdata)) {
 		if (dv_toggle_prov_name) /*debug purpose*/
